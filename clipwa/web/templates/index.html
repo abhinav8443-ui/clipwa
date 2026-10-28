@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clipwa - AI Viral Shorts & Video Automation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-main: #0B0E14;
+      --bg-card: rgba(22, 27, 38, 0.75);
+      --bg-input: #111622;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-focus: #6366F1;
+      --primary: #6366F1;
+      --primary-hover: #4F46E5;
+      --accent-cyan: #06B6D4;
+      --accent-yellow: #F59E0B;
+      --accent-green: #10B981;
+      --text-main: #F3F4F6;
+      --text-muted: #9CA3AF;
+      --radius: 14px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 1.5rem 2.5rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(11, 14, 20, 0.8);
+      backdrop-filter: blur(12px);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .brand-icon {
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, #6366F1, #EC4899);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 1.25rem;
+      box-shadow: 0 4px 14px rgba(99, 102, 241, 0.4);
+    }
+    .brand h1 {
+      font-size: 1.4rem;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      background: linear-gradient(90deg, #FFFFFF, #CBD5E1);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .badge-free {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34D399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      padding: 0.2rem 0.6rem;
+      border-radius: 20px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    main {
+      max-width: 1350px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 2.5rem;
+      display: grid;
+      grid-template-columns: 460px 1fr;
+      gap: 2.5rem;
+      flex: 1;
+    }
+
+    .card {
+      background: var(--bg-card);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.8rem;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+    }
+
+    .section-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      margin-bottom: 1.25rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: #FFFFFF;
+    }
+
+    .form-group {
+      margin-bottom: 1.35rem;
+    }
+    label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 0.4rem;
+    }
+    input[type="text"], select {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.75rem 1rem;
+      color: #FFFFFF;
+      font-size: 0.92rem;
+      font-family: inherit;
+      transition: all 0.2s;
+    }
+    input[type="text"]:focus, select:focus {
+      outline: none;
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+    }
+
+    .range-wrap {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    input[type="range"] {
+      flex: 1;
+      accent-color: var(--primary);
+    }
+    .range-val {
+      font-weight: 700;
+      font-size: 0.9rem;
+      color: var(--accent-cyan);
+      min-width: 25px;
+    }
+
+    .btn-submit {
+      width: 100%;
+      background: linear-gradient(135deg, #6366F1, #8B5CF6);
+      border: none;
+      color: #FFFFFF;
+      padding: 0.9rem;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 1rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      box-shadow: 0 6px 20px rgba(99, 102, 241, 0.35);
+      transition: all 0.2s;
+    }
+    .btn-submit:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(99, 102, 241, 0.5);
+    }
+    .btn-submit:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .progress-box {
+      margin-top: 1.5rem;
+      background: var(--bg-input);
+      border-radius: 10px;
+      padding: 1rem;
+      border: 1px solid var(--border);
+      display: none;
+    }
+    .progress-bar-bg {
+      height: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 0.6rem;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #6366F1, #06B6D4);
+      width: 0%;
+      transition: width 0.3s;
+    }
+    .progress-status-text {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #CBD5E1;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .log-box {
+      background: #07090E;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.8rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.78rem;
+      color: #94A3B8;
+      height: 120px;
+      overflow-y: auto;
+      margin-top: 0.8rem;
+    }
+
+    .clips-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+      gap: 1.5rem;
+    }
+    .clip-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+    .clip-card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(99, 102, 241, 0.4);
+    }
+    .video-wrap {
+      background: #000;
+      aspect-ratio: 9/16;
+      max-height: 400px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .virality-pill {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(8px);
+      color: #FBBF24;
+      border: 1px solid rgba(251, 191, 36, 0.4);
+      padding: 0.25rem 0.6rem;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    .clip-content {
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      flex: 1;
+    }
+    .clip-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: #FFFFFF;
+      line-height: 1.3;
+    }
+    .clip-meta {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+    }
+    .clip-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.6rem;
+      margin-top: auto;
+      padding-top: 0.5rem;
+    }
+    .btn-action {
+      padding: 0.55rem;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.3rem;
+      text-decoration: none;
+      transition: all 0.15s;
+    }
+    .btn-download {
+      background: rgba(255, 255, 255, 0.05);
+      color: #FFFFFF;
+    }
+    .btn-download:hover { background: rgba(255, 255, 255, 0.1); }
+    .btn-upload-yt {
+      background: rgba(239, 68, 68, 0.15);
+      color: #F87171;
+      border-color: rgba(239, 68, 68, 0.3);
+    }
+    .btn-upload-yt:hover { background: rgba(239, 68, 68, 0.25); }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 5rem 2rem;
+      text-align: center;
+      color: var(--text-muted);
+      border: 2px dashed rgba(255, 255, 255, 0.08);
+      border-radius: var(--radius);
+    }
+    .empty-state-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+      opacity: 0.6;
+    }
+
+    @media (max-width: 1024px) {
+      main { grid-template-columns: 1fr; padding: 1.5rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-icon">⚡</div>
+      <div>
+        <h1>Clipwa Studio</h1>
+      </div>
+      <span class="badge-free">100% Free & Open-Source</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Left Configuration Panel -->
+    <section class="card">
+      <h2 class="section-title">🎬 Viral Video Generator</h2>
+
+      <form id="pipelineForm">
+        <div class="form-group">
+          <label>Video URL or Local File Path</label>
+          <input type="text" id="videoUrl" placeholder="https://youtube.com/watch?v=... or C:/video.mp4" required>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+          <div class="form-group">
+            <label>Clips Count</label>
+            <div class="range-wrap">
+              <input type="range" id="maxClips" min="1" max="5" value="3" oninput="document.getElementById('clipsVal').innerText = this.value">
+              <span class="range-val" id="clipsVal">3</span>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Whisper Model</label>
+            <select id="whisperModel">
+              <option value="tiny" selected>Tiny (Ultra Fast CPU)</option>
+              <option value="base">Base (Balanced)</option>
+              <option value="small">Small (High Accuracy)</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+          <div class="form-group">
+            <label>9:16 Framing Mode</label>
+            <select id="layoutMode">
+              <option value="auto" selected>Auto (Face / Blurred Stack)</option>
+              <option value="face_track">Face Tracking Crop</option>
+              <option value="blurred_stack">Blurred Background Stack</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Caption Style</label>
+            <select id="captionTheme">
+              <option value="hormozi_yellow" selected>Alex Hormozi Yellow</option>
+              <option value="neon_cyan">Electric Cyan</option>
+              <option value="emerald_green">Emerald Green</option>
+              <option value="hot_pink">Hot Pink</option>
+              <option value="clean_white">Minimal White</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+          <div class="form-group">
+            <label>AI Brain</label>
+            <select id="aiProvider">
+              <option value="gemini" selected>Gemini 2.5 Flash (Free Tier)</option>
+              <option value="groq">Groq LLaMA 3.3</option>
+              <option value="ollama">Local Ollama</option>
+              <option value="heuristic">Heuristic (Offline Rule-Based)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Words per Subtitle</label>
+            <select id="wordsPerLine">
+              <option value="2">2 Words (Fast)</option>
+              <option value="3" selected>3 Words (Hormozi Standard)</option>
+              <option value="4">4 Words</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top: 0.5rem; background: rgba(255,255,255,0.03); padding: 0.75rem; border-radius: 8px;">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <label style="margin: 0; cursor: pointer;" for="ytUploadCheck">YouTube Shorts Auto-Upload</label>
+            <input type="checkbox" id="ytUploadCheck" style="cursor: pointer; width: 18px; height: 18px;">
+          </div>
+          <div id="ytOptions" style="display: none; margin-top: 0.75rem;">
+            <label>Shorts Privacy</label>
+            <select id="ytPrivacy">
+              <option value="private" selected>Private (Safest for review)</option>
+              <option value="unlisted">Unlisted</option>
+              <option value="public">Public</option>
+            </select>
+          </div>
+        </div>
+
+        <button type="submit" class="btn-submit" id="submitBtn">
+          <span>⚡ Generate Viral Shorts</span>
+        </button>
+      </form>
+
+      <!-- Progress Section -->
+      <div class="progress-box" id="progressBox">
+        <div class="progress-status-text">
+          <span id="stageName">Processing...</span>
+          <span id="pctText">0%</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill" id="barFill"></div>
+        </div>
+        <div class="log-box" id="logBox"></div>
+      </div>
+    </section>
+
+    <!-- Right Generated Clips Gallery -->
+    <section>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem;">
+        <h2 class="section-title" style="margin: 0;">🔥 Generated Clips (<span id="clipsCount">0</span>)</h2>
+        <span style="font-size: 0.85rem; color: var(--text-muted);">Format: 1080x1920 (9:16 Vertical)</span>
+      </div>
+
+      <div class="clips-grid" id="clipsGrid">
+        <div class="empty-state" id="emptyState">
+          <div class="empty-state-icon">📱</div>
+          <h3>No Shorts Generated Yet</h3>
+          <p style="margin-top: 0.4rem; font-size: 0.88rem;">Enter a video URL or local file on the left and hit "Generate Viral Shorts".</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById('pipelineForm');
+    const submitBtn = document.getElementById('submitBtn');
+    const progressBox = document.getElementById('progressBox');
+    const stageName = document.getElementById('stageName');
+    const pctText = document.getElementById('pctText');
+    const barFill = document.getElementById('barFill');
+    const logBox = document.getElementById('logBox');
+    const clipsGrid = document.getElementById('clipsGrid');
+    const emptyState = document.getElementById('emptyState');
+    const clipsCount = document.getElementById('clipsCount');
+    const ytUploadCheck = document.getElementById('ytUploadCheck');
+    const ytOptions = document.getElementById('ytOptions');
+
+    ytUploadCheck.addEventListener('change', () => {
+      ytOptions.style.display = ytUploadCheck.checked ? 'block' : 'none';
+    });
+
+    let pollingInterval = null;
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const payload = {
+        url: document.getElementById('videoUrl').value.trim(),
+        max_clips: parseInt(document.getElementById('maxClips').value),
+        whisper_model: document.getElementById('whisperModel').value,
+        layout: document.getElementById('layoutMode').value,
+        theme: document.getElementById('captionTheme').value,
+        provider: document.getElementById('aiProvider').value,
+        words_per_line: parseInt(document.getElementById('wordsPerLine').value),
+        upload: ytUploadCheck.checked,
+        privacy: document.getElementById('ytPrivacy').value,
+        dry_run_upload: false
+      };
+
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = '<span>⏳ Processing Pipeline...</span>';
+      progressBox.style.display = 'block';
+
+      try {
+        const resp = await fetch('/api/process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const res = await resp.json();
+        if (resp.ok) {
+          startPolling();
+        } else {
+          alert('Error: ' + (res.error || 'Failed to start pipeline'));
+          resetSubmitBtn();
+        }
+      } catch (err) {
+        alert('Connection error: ' + err.message);
+        resetSubmitBtn();
+      }
+    });
+
+    function startPolling() {
+      if (pollingInterval) clearInterval(pollingInterval);
+      pollingInterval = setInterval(async () => {
+        try {
+          const resp = await fetch('/api/status');
+          const state = await resp.json();
+
+          stageName.innerText = state.message || state.stage;
+          const pct = state.progress_percent || 0;
+          pctText.innerText = pct + '%';
+          barFill.style.width = pct + '%';
+
+          if (state.logs && state.logs.length) {
+            logBox.innerHTML = state.logs.join('<br>');
+            logBox.scrollTop = logBox.scrollHeight;
+          }
+
+          if (state.status === 'completed' || state.status === 'error') {
+            clearInterval(pollingInterval);
+            resetSubmitBtn();
+            fetchClips();
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }, 1500);
+    }
+
+    function resetSubmitBtn() {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = '<span>⚡ Generate Viral Shorts</span>';
+    }
+
+    async function fetchClips() {
+      try {
+        const resp = await fetch('/api/clips');
+        const data = await resp.json();
+        const clips = data.clips || [];
+
+        if (clips.length > 0) {
+          emptyState.style.display = 'none';
+          clipsCount.innerText = clips.length;
+
+          clipsGrid.innerHTML = clips.map(clip => `
+            <div class="clip-card">
+              <div class="video-wrap">
+                <video src="/video/${clip.file_name}" controls preload="metadata"></video>
+                <div class="virality-pill">🔥 ${clip.virality_score}% Virality</div>
+              </div>
+              <div class="clip-content">
+                <div class="clip-title">${clip.youtube_title}</div>
+                <div class="clip-meta">
+                  <span>⏱️ ${clip.duration}s (${clip.start_time}s - ${clip.end_time}s)</span>
+                  <span>📦 ${(clip.file_size_bytes / (1024*1024)).toFixed(1)} MB</span>
+                </div>
+                <p style="font-size: 0.76rem; color: #94A3B8; font-style: italic;">"${clip.hook_text}"</p>
+                <div class="clip-actions">
+                  <a href="/video/${clip.file_name}" download="${clip.file_name}" class="btn-action btn-download">
+                    ⬇️ Download
+                  </a>
+                  <button onclick="uploadToYouTube('${clip.file_name}', '${encodeURIComponent(clip.youtube_title)}', '${encodeURIComponent(clip.youtube_description)}')" class="btn-action btn-upload-yt">
+                    🚀 YouTube
+                  </button>
+                </div>
+              </div>
+            </div>
+          `).join('');
+        }
+      } catch (e) {
+        console.error('Error fetching clips:', e);
+      }
+    }
+
+    async function uploadToYouTube(fileName, titleEncoded, descEncoded) {
+      const title = decodeURIComponent(titleEncoded);
+      const desc = decodeURIComponent(descEncoded);
+      if (!confirm(`Upload "${title}" directly to YouTube Shorts?`)) return;
+
+      try {
+        const resp = await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clip_name: fileName,
+            title: title,
+            description: desc,
+            privacy: 'private',
+            dry_run: false
+          })
+        });
+        const res = await resp.json();
+        if (resp.ok && res.url) {
+          alert('Successfully uploaded to YouTube Shorts!\nURL: ' + res.url);
+        } else {
+          alert('Upload status: ' + (res.error || res.status || 'Check server logs'));
+        }
+      } catch (err) {
+        alert('Upload error: ' + err.message);
+      }
+    }
+
+    // Initial check on load
+    fetchClips();
+  </script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+google-genai>=2.30.0
+faster-whisper>=1.2.0
+pysubs2>=1.9.0
+opencv-python>=4.10.0
+mediapipe>=0.10.0
+yt-dlp>=2025.1.0
+google-api-python-client>=2.150.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+rich>=13.0.0
+click>=8.1.0
+pydantic>=2.10.0
+imageio-ffmpeg>=0.5.1

@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.installed.cfg
+*.egg
+build/
+dist/
+temp/*
+!temp/.gitkeep
+output/*
+!output/.gitkeep
+.env
+token.json
+client_secrets.json
+.cache/
