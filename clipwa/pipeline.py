@@ -1,6 +1,6 @@
 """
-End-to-end processing pipeline orchestrating download, transcription, AI moment detection,
-9:16 editing, dynamic captions, and YouTube Shorts uploading.
+End-to-end processing pipeline orchestrating two-stage downloading, AI moment detection,
+targeted partial clip downloads, exact word alignment, 9:16 reframing, and YouTube upload.
 """
 
 import json
@@ -19,7 +19,7 @@ from .video_editor import VideoEditor
 
 
 class ClipwaPipeline:
-    """Master orchestrator for the automated viral clipping & Shorts publishing pipeline."""
+    """Master orchestrator for the high-speed automated viral clipping & Shorts pipeline."""
 
     def __init__(
         self,
@@ -35,7 +35,7 @@ class ClipwaPipeline:
         self.downloader = MediaDownloader(temp_dir=self.temp_dir)
         self.transcriber = LocalTranscriber(
             model_size=whisper_model or Config.WHISPER_MODEL,
-            device=whisper_device or Config.WHISPER_DEVICE,
+            device=whisper_device,
         )
         self.ai_brain = ViralMomentDetector(
             provider=llm_provider or Config.DEFAULT_LLM_PROVIDER,
@@ -50,7 +50,7 @@ class ClipwaPipeline:
         max_clips: int = 3,
         min_clip_duration: float = 25.0,
         max_clip_duration: float = 60.0,
-        layout_mode: str = "auto",  # auto, face_track, blurred_stack
+        layout_mode: str = "auto",
         caption_theme: str = "hormozi_yellow",
         words_per_line: int = 3,
         upload_to_youtube: bool = False,
@@ -59,7 +59,9 @@ class ClipwaPipeline:
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Execute full automated pipeline from source video URL/file to finished YouTube Shorts.
+        Execute optimized two-stage pipeline:
+        - If URL: Captions/low-audio first -> AI picks moments -> download ONLY those 30-60s sections -> word align -> render.
+        - If local file: full local pipeline with backwards compatibility.
         """
         start_clock = time.time()
         results: Dict[str, Any] = {
@@ -78,24 +80,50 @@ class ClipwaPipeline:
                 data["message"] = message
                 progress_callback(data)
 
-        # Step 1: Download or locate media & extract audio
-        notify("download", "Downloading / reading source media...")
-        video_path, audio_path, media_info = self.downloader.download(
-            url_or_path,
-            progress_callback=lambda d: notify("download_progress", "Downloading media stream...", d),
-        )
-        results["metadata"] = media_info
+        is_local = os.path.exists(url_or_path)
 
-        # Step 2: Transcribe audio locally with word-level timestamps
-        notify("transcribe", f"Transcribing audio locally using faster-whisper ({self.transcriber.model_size})...")
-        transcript_data = self.transcriber.transcribe(
-            audio_path,
-            progress_callback=lambda d: notify("transcribe_progress", "Transcribing speech...", d),
-        )
+        # ---------------------------------------------------------
+        # STAGE 1: FAST DISCOVERY & TRANSCRIPTION
+        # ---------------------------------------------------------
+        if is_local:
+            notify("download", "Reading local media file...")
+            video_path, audio_path, media_info = self.downloader.download(url_or_path)
+            results["metadata"] = media_info
+
+            notify("transcribe", f"Transcribing local audio with faster-whisper ({self.transcriber.model_size})...")
+            transcript_data = self.transcriber.transcribe(
+                audio_path,
+                word_timestamps=True,
+                progress_callback=lambda d: notify("transcribe_progress", "Transcribing speech...", d),
+            )
+        else:
+            notify("discovery", "Checking for YouTube captions/subtitles...")
+            transcript_data, audio_path, media_info = self.downloader.fetch_fast_transcript_or_audio(
+                url_or_path,
+                progress_callback=lambda d: notify(d.get("stage", "discovery"), d.get("message", ""), d),
+            )
+            results["metadata"] = media_info
+
+            if transcript_data and transcript_data.get("segments"):
+                notify(
+                    "discovery",
+                    f"Direct YouTube captions loaded ({len(transcript_data['segments'])} segments). Skipping full Whisper audio transcribe!",
+                )
+            else:
+                notify("transcribe", f"Running fast coarse transcription on low-bitrate audio ({self.transcriber.device})...")
+                transcript_data = self.transcriber.transcribe(
+                    audio_path,
+                    word_timestamps=False,
+                    beam_size=1,
+                    progress_callback=lambda d: notify("transcribe_progress", "Coarse transcribing speech...", d),
+                )
+
         results["transcript_words_count"] = len(transcript_data.get("words", []))
 
-        # Step 3: Analyze transcript with AI Brain to find viral moments
-        notify("ai_brain", f"Analyzing transcript for top {max_clips} viral moments with {self.ai_brain.provider}...")
+        # ---------------------------------------------------------
+        # STAGE 2: AI BRAIN MOMENT DETECTION
+        # ---------------------------------------------------------
+        notify("ai_brain", f"AI Brain analyzing transcript for top {max_clips} viral moments...")
         moments = self.ai_brain.detect_moments(
             transcript_data=transcript_data,
             max_clips=max_clips,
@@ -121,12 +149,10 @@ class ClipwaPipeline:
 
         results["detected_moments"] = moments
 
-        # Step 4: Process and edit each moment into a 9:16 Short
-        sub_gen = SubtitleGenerator(
-            theme=caption_theme,
-            words_per_line=words_per_line,
-        )
-
+        # ---------------------------------------------------------
+        # STAGE 3 & 4: TARGETED DOWNLOAD, WORD ALIGNMENT, & 9:16 RENDERING
+        # ---------------------------------------------------------
+        sub_gen = SubtitleGenerator(theme=caption_theme, words_per_line=words_per_line)
         processed_clips: List[Dict[str, Any]] = []
 
         for idx, moment in enumerate(moments):
@@ -134,30 +160,71 @@ class ClipwaPipeline:
             clip_st = moment["start_time"]
             clip_et = moment["end_time"]
             clip_dur = moment["duration"]
+            base_filename = f"clip_{clip_num}_{int(clip_st)}_{int(clip_et)}"
 
+            if is_local:
+                # Local file: Use original video directly
+                target_video = video_path
+                render_st = clip_st
+                render_et = clip_et
+
+                # Subtitles from overall transcript
+                ass_path = str(self.temp_dir / f"{base_filename}.ass")
+                sub_gen.generate_ass(
+                    words=transcript_data.get("words", []),
+                    output_path=ass_path,
+                    clip_start=clip_st,
+                    clip_end=clip_et,
+                )
+            else:
+                # Remote URL: Download ONLY this 30-60s clip
+                notify(
+                    "clip_download",
+                    f"Downloading section for Clip {clip_num}/{len(moments)}: [{clip_st}s -> {clip_et}s] ({clip_dur}s)...",
+                    clip_index=clip_num,
+                    total_clips=len(moments),
+                )
+                raw_clip_path = str(self.temp_dir / f"raw_section_{clip_num}.mp4")
+                actual_clip_path = self.downloader.download_clip_section(
+                    url_or_path=url_or_path,
+                    start_time=clip_st,
+                    end_time=clip_et,
+                    output_path=raw_clip_path,
+                    progress_callback=lambda d: notify("download_progress", "Downloading clip section...", d),
+                )
+                target_video = actual_clip_path
+                render_st = 0.0
+                render_et = clip_dur
+
+                # Extract audio for just this 30-60s clip and get exact word timestamps
+                clip_audio = str(self.temp_dir / f"clip_audio_{clip_num}.wav")
+                self.downloader.extract_audio(actual_clip_path, clip_audio)
+
+                notify("clip_transcribe", f"Aligning word timestamps for Clip {clip_num}...")
+                clip_words_data = self.transcriber.transcribe(clip_audio, word_timestamps=True)
+
+                # Generate ASS Subtitles for the clip starting from 0.0s
+                ass_path = str(self.temp_dir / f"{base_filename}.ass")
+                sub_gen.generate_ass(
+                    words=clip_words_data.get("words", []),
+                    output_path=ass_path,
+                    clip_start=0.0,
+                    clip_end=clip_dur,
+                )
+
+            # Render 9:16 vertical video with auto face-tracking or blurred stack + burned subtitles
+            out_mp4_name = f"{base_filename}_short.mp4"
             notify(
                 "render_clip",
-                f"Generating Clip {clip_num}/{len(moments)}: [{clip_st}s -> {clip_et}s] (Virality: {moment['virality_score']}%)",
+                f"Rendering 9:16 Short {clip_num}/{len(moments)}: {moment.get('youtube_title', '')} (Virality: {moment['virality_score']}%)",
                 clip_index=clip_num,
                 total_clips=len(moments),
             )
 
-            # Generate ASS Subtitles for this specific clip time window
-            base_filename = f"clip_{clip_num}_{int(clip_st)}_{int(clip_et)}"
-            ass_path = str(self.temp_dir / f"{base_filename}.ass")
-            sub_gen.generate_ass(
-                words=transcript_data.get("words", []),
-                output_path=ass_path,
-                clip_start=clip_st,
-                clip_end=clip_et,
-            )
-
-            # Render 9:16 vertical video with auto face-tracking or blurred stack + burned subtitles
-            out_mp4_name = f"{base_filename}_short.mp4"
             final_clip_path = self.editor.render_clip(
-                video_path=video_path,
-                start_time=clip_st,
-                end_time=clip_et,
+                video_path=target_video,
+                start_time=render_st,
+                end_time=render_et,
                 output_filename=out_mp4_name,
                 subtitle_ass_path=ass_path,
                 layout_mode=layout_mode,
@@ -181,7 +248,7 @@ class ClipwaPipeline:
                 "upload_result": None,
             }
 
-            # Step 5: (Optional) Upload to YouTube Shorts
+            # Optional YouTube Shorts upload
             if upload_to_youtube:
                 notify("upload_short", f"Uploading Clip {clip_num} to YouTube Shorts ({youtube_privacy})...")
                 try:

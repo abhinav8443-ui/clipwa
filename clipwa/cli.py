@@ -12,7 +12,7 @@ import click
 from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
 
 from .ai_brain import ViralMomentDetector
@@ -103,26 +103,51 @@ def process(
 
     with Progress(
         SpinnerColumn(spinner_name="line"),
-        TextColumn("[progress.description]{task.description}"),
+        TextColumn("[bold cyan]{task.fields[stage]}[/bold cyan]"),
+        BarColumn(bar_width=None),
+        TaskProgressColumn(),
+        TextColumn("{task.description}"),
         console=console,
     ) as progress:
-        task = progress.add_task("[cyan]Initializing pipeline...", total=None)
+        task = progress.add_task("", total=100, completed=0, stage="Starting")
 
         def callback(event):
             stage = event.get("stage", "")
             msg = event.get("message", "")
-            if stage == "download":
-                progress.update(task, description=f"[blue]1/5 Download:[/blue] {msg}")
+            pct = event.get("percent")
+            speed = event.get("speed")
+            eta = event.get("eta")
+
+            speed_str = ""
+            if speed and speed > 0:
+                mb_s = speed / (1024 * 1024)
+                speed_str = f" [{mb_s:.1f} MB/s]"
+            if eta and eta > 0:
+                speed_str += f" [ETA {int(eta)}s]"
+
+            if stage in ("download_progress", "transcribe_progress", "upload_progress", "render_progress"):
+                if pct is not None:
+                    progress.update(task, completed=pct, description=f"{msg}{speed_str}")
+            elif stage == "discovery":
+                progress.update(task, stage="1/4 Discovery", description=msg)
             elif stage == "transcribe":
-                progress.update(task, description=f"[yellow]2/5 Whisper Transcribe:[/yellow] {msg}")
+                progress.update(task, stage="1/4 Transcribe", completed=10, description=msg)
             elif stage == "ai_brain":
-                progress.update(task, description=f"[magenta]3/5 AI Brain Analysis:[/magenta] {msg}")
+                progress.update(task, stage="2/4 AI Brain", completed=40, description=msg)
+            elif stage == "clip_download":
+                c_idx = event.get("clip_index", 1)
+                t_clips = event.get("total_clips", 1)
+                progress.update(task, stage=f"3/4 Download {c_idx}/{t_clips}", completed=15, description=msg)
+            elif stage == "clip_transcribe":
+                progress.update(task, stage="3/4 Word Align", completed=60, description=msg)
             elif stage == "render_clip":
-                progress.update(task, description=f"[green]4/5 Video Edit & Reframe:[/green] {msg}")
+                c_idx = event.get("clip_index", 1)
+                t_clips = event.get("total_clips", 1)
+                progress.update(task, stage=f"4/4 Render {c_idx}/{t_clips}", completed=80, description=msg)
             elif stage == "upload_short":
-                progress.update(task, description=f"[red]5/5 YouTube Upload:[/red] {msg}")
+                progress.update(task, stage="5/5 YouTube", completed=95, description=msg)
             elif stage == "finished":
-                progress.update(task, description=f"[bold green]Done:[/bold green] {msg}")
+                progress.update(task, stage="Finished", completed=100, description=msg)
 
         result = pipeline.process_video(
             url_or_path=url_or_file,

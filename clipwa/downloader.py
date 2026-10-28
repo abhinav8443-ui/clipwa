@@ -1,26 +1,36 @@
 """
-High-quality media downloader and preprocessor using yt-dlp and FFmpeg.
+High-quality media downloader with fast two-stage downloading (captions first, partial video later).
 """
 
+import glob
+import json
 import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
+import pysubs2
 import yt_dlp
+from yt_dlp.utils import download_range_func
 
 from .config import Config
 
 
 class MediaDownloader:
-    """Downloads source video and extracts audio for downstream processing."""
+    """Downloads source media, extracts subtitles/audio, and fetches targeted clip sections."""
 
     def __init__(self, temp_dir: Optional[Path] = None):
         self.temp_dir = temp_dir or Config.TEMP_DIR
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.ffmpeg_path = Config.FFMPEG_PATH
+        self.ffmpeg_dir = str(Config.BIN_DIR)
+
+        # Ensure ffmpeg dir is in PATH for yt-dlp
+        current_path = os.environ.get("PATH", "")
+        if self.ffmpeg_dir not in current_path:
+            os.environ["PATH"] = f"{self.ffmpeg_dir}{os.pathsep}{current_path}"
 
     @staticmethod
     def sanitize_filename(name: str) -> str:
@@ -44,7 +54,7 @@ class MediaDownloader:
             return {
                 "id": filename,
                 "title": filename.replace("_", " "),
-                "duration": duration,
+                "duration": round(duration, 2),
                 "width": width,
                 "height": height,
                 "fps": fps,
@@ -57,14 +67,14 @@ class MediaDownloader:
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
-            "ffmpeg_location": self.ffmpeg_path,
+            "ffmpeg_location": self.ffmpeg_dir,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url_or_path, download=False)
             return {
                 "id": info.get("id", "video"),
                 "title": info.get("title", "Untitled Video"),
-                "duration": info.get("duration", 0),
+                "duration": round(info.get("duration", 0) or 0, 2),
                 "width": info.get("width", 1920),
                 "height": info.get("height", 1080),
                 "fps": info.get("fps", 30),
@@ -75,14 +85,322 @@ class MediaDownloader:
                 "filepath": None,
             }
 
+    def fetch_fast_transcript_or_audio(
+        self,
+        url_or_path: str,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str], Dict[str, Any]]:
+        """
+        Stage 1: Fast discovery pass.
+        1. If local file: extracts audio and returns (None, audio_path, info).
+        2. If remote URL: attempts to download existing subtitles / auto-captions in < 3s.
+        3. If subtitles exist: parses directly and returns (transcript_data, None, info).
+        4. If no subtitles: downloads audio-only at low bitrate and returns (None, audio_path, info).
+        """
+        info = self.get_info(url_or_path)
+        base_name = self.sanitize_filename(info["title"])
+
+        if info["is_local"]:
+            video_path = info["filepath"]
+            audio_path = str(self.temp_dir / f"{base_name}_16k.wav")
+            self.extract_audio(video_path, audio_path)
+            return None, audio_path, info
+
+        # Remote URL: Try downloading subtitles/auto-captions first
+        if progress_callback:
+            progress_callback({"stage": "discovery", "message": "Checking for YouTube captions/subtitles..."})
+
+        sub_prefix = str(self.temp_dir / f"sub_{info['id']}")
+        # Remove any stale subtitle files
+        for old_f in glob.glob(f"{sub_prefix}*"):
+            try:
+                os.remove(old_f)
+            except Exception:
+                pass
+
+        sub_opts = {
+            "skip_download": True,
+            "writeautomaticsub": True,
+            "writesubtitles": True,
+            "subtitleslangs": ["en", "en-orig", "en-US", "en-GB"],
+            "subtitlesformat": "json3/vtt/srt",
+            "outtmpl": f"{sub_prefix}.%(ext)s",
+            "ffmpeg_location": self.ffmpeg_dir,
+            "quiet": True,
+            "no_warnings": True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(sub_opts) as ydl:
+                ydl.download([url_or_path])
+        except Exception as e:
+            print(f"[MediaDownloader] Subtitle check notice: {e}")
+
+        # Check if subtitle file was downloaded
+        found_subs = glob.glob(f"{sub_prefix}*.json3") or glob.glob(f"{sub_prefix}*.vtt") or glob.glob(f"{sub_prefix}*.srt")
+        if found_subs:
+            best_sub = found_subs[0]
+            # Prioritize json3 for exact word offsets
+            for s in found_subs:
+                if s.endswith(".json3"):
+                    best_sub = s
+                    break
+
+            try:
+                transcript_data = self._parse_subtitle_file(best_sub)
+                if transcript_data and transcript_data.get("segments"):
+                    if progress_callback:
+                        progress_callback({
+                            "stage": "discovery",
+                            "message": f"Successfully parsed {len(transcript_data['segments'])} caption segments from YouTube!",
+                        })
+                    return transcript_data, None, info
+            except Exception as e:
+                print(f"[MediaDownloader] Error parsing subtitles ({e}), falling back to audio download...")
+
+        # Fallback: Download audio-only at low bitrate
+        if progress_callback:
+            progress_callback({"stage": "download_audio", "message": "Downloading low-bitrate audio for Whisper..."})
+
+        audio_output_template = str(self.temp_dir / f"{base_name}_audio.%(ext)s")
+
+        def hook(d: Dict[str, Any]) -> None:
+            if progress_callback and d.get("status") == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
+                downloaded = d.get("downloaded_bytes") or 0
+                pct = (downloaded / total) * 100
+                progress_callback({
+                    "stage": "download_progress",
+                    "percent": round(pct, 1),
+                    "speed": d.get("speed", 0),
+                    "eta": d.get("eta", 0),
+                    "message": f"Downloading audio: {pct:.1f}%",
+                })
+
+        audio_opts = {
+            "format": "ba[abr<=64]/worstaudio/ba/b",
+            "outtmpl": audio_output_template,
+            "ffmpeg_location": self.ffmpeg_dir,
+            "concurrent_fragment_downloads": 8,
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": [hook] if progress_callback else [],
+        }
+
+        with yt_dlp.YoutubeDL(audio_opts) as ydl:
+            download_info = ydl.extract_info(url_or_path, download=True)
+            downloaded_audio = ydl.prepare_filename(download_info)
+
+        wav_path = str(self.temp_dir / f"{base_name}_16k.wav")
+        self.extract_audio(downloaded_audio, wav_path)
+        return None, wav_path, info
+
+    def download_clip_section(
+        self,
+        url_or_path: str,
+        start_time: float,
+        end_time: float,
+        output_path: str,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> str:
+        """
+        Stage 2: Download ONLY the specific 30-60s viral segment using yt-dlp partial ranges.
+        If local file, uses FFmpeg to cut the section directly.
+        """
+        # If local file, use FFmpeg fast stream copy or re-encode
+        if os.path.exists(url_or_path):
+            dur = end_time - start_time
+            cmd = [
+                self.ffmpeg_path,
+                "-y",
+                "-ss",
+                f"{start_time:.3f}",
+                "-t",
+                f"{dur:.3f}",
+                "-i",
+                url_or_path,
+                "-c",
+                "copy",
+                output_path,
+            ]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            return output_path
+
+        # Remote URL: Download targeted section with a 1.0s buffer
+        buffer_start = max(0.0, start_time - 1.0)
+        buffer_end = end_time + 1.0
+        ranges = [(buffer_start, buffer_end)]
+
+        def hook(d: Dict[str, Any]) -> None:
+            if progress_callback and d.get("status") == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
+                downloaded = d.get("downloaded_bytes") or 0
+                pct = (downloaded / total) * 100
+                progress_callback({
+                    "stage": "download_progress",
+                    "percent": round(pct, 1),
+                    "speed": d.get("speed", 0),
+                    "eta": d.get("eta", 0),
+                    "message": f"Downloading clip section: {pct:.1f}%",
+                })
+
+        base_out = os.path.splitext(output_path)[0]
+        outtmpl = f"{base_out}.%(ext)s"
+
+        ydl_opts = {
+            "format": "bv*[protocol^=http][height<=1080]+ba[protocol^=http]/bv*[height<=1080]+ba/b[height<=1080]/best",
+            "outtmpl": outtmpl,
+            "merge_output_format": "mp4",
+            "ffmpeg_location": self.ffmpeg_dir,
+            "download_ranges": download_range_func(None, ranges),
+            "concurrent_fragment_downloads": 8,
+            "overwrites": True,
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": [hook] if progress_callback else [],
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url_or_path])
+
+        # Locate actual saved file
+        if os.path.exists(output_path):
+            return output_path
+
+        candidates = glob.glob(f"{base_out}.*")
+        for cand in candidates:
+            if cand.endswith((".mp4", ".mkv", ".webm", ".ts")):
+                if not cand.endswith(".mp4"):
+                    # Fast remux to mp4
+                    cmd = [self.ffmpeg_path, "-y", "-i", cand, "-c", "copy", output_path]
+                    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if p.returncode == 0 and os.path.exists(output_path):
+                        return output_path
+                return cand
+
+        return output_path
+
+    def _parse_subtitle_file(self, sub_path: str) -> Dict[str, Any]:
+        """Parse YouTube json3 or VTT/SRT subtitles into standard transcript data."""
+        if sub_path.endswith(".json3"):
+            with open(sub_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            events = data.get("events", [])
+            segments = []
+            all_words = []
+            full_text_parts = []
+            formatted_lines = []
+
+            for ev in events:
+                if "segs" not in ev:
+                    continue
+                t_start = ev.get("tStartMs", 0) / 1000.0
+                t_dur = ev.get("dDurationMs", 0) / 1000.0
+                t_end = t_start + t_dur
+                text = "".join(s.get("utf8", "") for s in ev["segs"]).strip()
+                if not text or text == "\n":
+                    continue
+
+                seg_words = []
+                for s in ev["segs"]:
+                    w_text = s.get("utf8", "").strip()
+                    if not w_text:
+                        continue
+                    offset = s.get("tOffsetMs", 0) / 1000.0
+                    w_start = t_start + offset
+                    w_end = min(t_end, w_start + 0.35)
+                    w_dict = {
+                        "word": w_text,
+                        "start": round(w_start, 3),
+                        "end": round(w_end, 3),
+                        "probability": 1.0,
+                    }
+                    seg_words.append(w_dict)
+                    all_words.append(w_dict)
+
+                segments.append({
+                    "id": len(segments),
+                    "start": round(t_start, 3),
+                    "end": round(t_end, 3),
+                    "text": text,
+                    "words": seg_words,
+                })
+                full_text_parts.append(text)
+
+                mins, secs = divmod(t_start, 60)
+                hours, mins = divmod(mins, 60)
+                fmt_t = f"{int(hours):02d}:{int(mins):02d}:{secs:04.1f}" if hours > 0 else f"{int(mins):02d}:{secs:04.1f}"
+                formatted_lines.append(f"[{fmt_t}] {text}")
+
+            return {
+                "language": "en",
+                "language_probability": 1.0,
+                "duration": round(segments[-1]["end"] if segments else 0, 2),
+                "full_text": " ".join(full_text_parts),
+                "formatted_transcript": "\n".join(formatted_lines),
+                "segments": segments,
+                "words": all_words,
+            }
+
+        # VTT / SRT fallback via pysubs2
+        subs = pysubs2.load(sub_path)
+        segments = []
+        all_words = []
+        full_text_parts = []
+        formatted_lines = []
+
+        for i, ev in enumerate(subs.events):
+            t_start = ev.start / 1000.0
+            t_end = ev.end / 1000.0
+            text = ev.text.replace("\\N", " ").strip()
+            if not text:
+                continue
+
+            words = text.split()
+            seg_words = []
+            dur_per_word = (t_end - t_start) / max(1, len(words))
+            for j, w in enumerate(words):
+                w_start = t_start + j * dur_per_word
+                w_end = w_start + dur_per_word
+                w_dict = {
+                    "word": w,
+                    "start": round(w_start, 3),
+                    "end": round(w_end, 3),
+                    "probability": 1.0,
+                }
+                seg_words.append(w_dict)
+                all_words.append(w_dict)
+
+            segments.append({
+                "id": i,
+                "start": round(t_start, 3),
+                "end": round(t_end, 3),
+                "text": text,
+                "words": seg_words,
+            })
+            full_text_parts.append(text)
+
+            mins, secs = divmod(t_start, 60)
+            formatted_lines.append(f"[{int(mins):02d}:{secs:04.1f}] {text}")
+
+        return {
+            "language": "en",
+            "language_probability": 1.0,
+            "duration": round(segments[-1]["end"] if segments else 0, 2),
+            "full_text": " ".join(full_text_parts),
+            "formatted_transcript": "\n".join(formatted_lines),
+            "segments": segments,
+            "words": all_words,
+        }
+
     def download(
         self,
         url_or_path: str,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Tuple[str, str, Dict[str, Any]]:
         """
-        Download media and extract 16kHz mono audio.
-        Returns: (video_path, audio_path, metadata)
+        Backwards-compatible full download method (used by test suite and local files).
         """
         info = self.get_info(url_or_path)
         base_name = self.sanitize_filename(info["title"])
@@ -93,7 +411,6 @@ class MediaDownloader:
             self.extract_audio(video_path, audio_path)
             return video_path, audio_path, info
 
-        # Download from URL
         video_output_template = str(self.temp_dir / f"{base_name}.%(ext)s")
 
         def hook(d: Dict[str, Any]) -> None:
@@ -102,7 +419,7 @@ class MediaDownloader:
                 downloaded = d.get("downloaded_bytes") or 0
                 pct = (downloaded / total) * 100
                 progress_callback({
-                    "stage": "downloading",
+                    "stage": "download_progress",
                     "percent": round(pct, 1),
                     "speed": d.get("speed", 0),
                     "eta": d.get("eta", 0),
@@ -112,7 +429,8 @@ class MediaDownloader:
             "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
             "outtmpl": video_output_template,
             "merge_output_format": "mp4",
-            "ffmpeg_location": self.ffmpeg_path,
+            "ffmpeg_location": self.ffmpeg_dir,
+            "concurrent_fragment_downloads": 8,
             "quiet": True,
             "no_warnings": True,
             "progress_hooks": [hook] if progress_callback else [],

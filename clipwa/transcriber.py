@@ -1,6 +1,5 @@
 """
-Local speech-to-text transcription with word-level timestamps using faster-whisper.
-Uses FFmpeg / standard library wave decoding to ensure 100% compatibility across all Python versions.
+Local speech-to-text transcription with fast coarse pass and exact word-level clip pass.
 """
 
 import json
@@ -17,7 +16,7 @@ from .config import Config
 
 
 class LocalTranscriber:
-    """Local, 100% free speech-to-text with word-level timestamps."""
+    """Local, 100% free speech-to-text with auto CUDA acceleration and multi-threading."""
 
     def __init__(
         self,
@@ -26,26 +25,59 @@ class LocalTranscriber:
         compute_type: Optional[str] = None,
     ):
         self.model_size = model_size or Config.WHISPER_MODEL
-        self.device = device or Config.WHISPER_DEVICE
-        self.compute_type = compute_type or Config.WHISPER_COMPUTE_TYPE
+
+        # Auto-detect CUDA acceleration
+        if device is None:
+            try:
+                import ctranslate2
+                if ctranslate2.get_cuda_device_count() > 0:
+                    self.device = "cuda"
+                    self.compute_type = compute_type or "float16"
+                else:
+                    self.device = "cpu"
+                    self.compute_type = compute_type or "int8"
+            except Exception:
+                self.device = "cpu"
+                self.compute_type = compute_type or "int8"
+        else:
+            self.device = device
+            self.compute_type = compute_type or ("float16" if device == "cuda" else "int8")
+
+        self.cpu_threads = os.cpu_count() or 4
         self._model: Optional[WhisperModel] = None
 
     @property
     def model(self) -> WhisperModel:
         """Lazy load Whisper model on first use."""
         if self._model is None:
-            self._model = WhisperModel(
-                self.model_size,
-                device=self.device,
-                compute_type=self.compute_type,
-            )
+            try:
+                self._model = WhisperModel(
+                    self.model_size,
+                    device=self.device,
+                    compute_type=self.compute_type,
+                    cpu_threads=self.cpu_threads,
+                )
+            except Exception as e:
+                # If CUDA fails (e.g. cuDNN missing), gracefully fallback to CPU
+                if self.device == "cuda":
+                    print(f"[LocalTranscriber] CUDA notice ({e}), falling back to CPU int8...")
+                    self.device = "cpu"
+                    self.compute_type = "int8"
+                    self._model = WhisperModel(
+                        self.model_size,
+                        device="cpu",
+                        compute_type="int8",
+                        cpu_threads=self.cpu_threads,
+                    )
+                else:
+                    raise e
         return self._model
 
     @staticmethod
     def load_audio(audio_input: Union[str, np.ndarray], sampling_rate: int = 16000) -> np.ndarray:
         """
-        Decode audio file into 16kHz float32 mono numpy array.
-        Bypasses PyAV library issues by using built-in wave or FFmpeg pipe.
+        Decode audio into 16kHz float32 mono numpy array.
+        Bypasses PyAV library issues by using built-in wave or direct FFmpeg pipe.
         """
         if isinstance(audio_input, np.ndarray):
             return audio_input.astype(np.float32)
@@ -103,17 +135,21 @@ class LocalTranscriber:
     def transcribe(
         self,
         audio_path_or_array: Union[str, np.ndarray],
+        word_timestamps: bool = True,
+        beam_size: int = 1,
         language: Optional[str] = None,
         cache: bool = True,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Transcribe audio locally with word-level timestamps.
-        Returns detailed transcript dict.
+        Transcribe audio locally.
+        Stage 1 coarse: word_timestamps=False, beam_size=1 (super fast)
+        Stage 2 exact clip: word_timestamps=True on 30-60s clip
         """
         cache_path = None
         if isinstance(audio_path_or_array, str) and cache:
-            cache_path = Path(audio_path_or_array).with_suffix(".transcript.json")
+            cache_suffix = ".words.transcript.json" if word_timestamps else ".coarse.transcript.json"
+            cache_path = Path(audio_path_or_array).with_suffix(cache_suffix)
             if cache_path.exists():
                 try:
                     with open(cache_path, "r", encoding="utf-8") as f:
@@ -122,19 +158,51 @@ class LocalTranscriber:
                     pass
 
         if progress_callback:
-            progress_callback({"stage": "transcribing", "status": "Transcribing audio locally..."})
+            mode_desc = "exact word-level" if word_timestamps else "fast coarse"
+            progress_callback({
+                "stage": "transcribing",
+                "message": f"Transcribing audio ({mode_desc} on {self.device})...",
+            })
 
         # Load audio into normalized float32 numpy array
         audio_np = self.load_audio(audio_path_or_array, sampling_rate=16000)
 
-        # Run faster-whisper with word timestamps
-        segments_gen, info = self.model.transcribe(
-            audio_np,
-            language=language,
-            word_timestamps=True,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
-        )
+        # Run faster-whisper with VAD and beam_size=1 for maximum throughput
+        import itertools
+        try:
+            segments_gen, info = self.model.transcribe(
+                audio_np,
+                language=language,
+                word_timestamps=word_timestamps,
+                beam_size=beam_size,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=500),
+            )
+            # Peek first item to verify CUDA execution
+            first_item = next(segments_gen, None)
+            if first_item is not None:
+                segments_gen = itertools.chain([first_item], segments_gen)
+        except Exception as e:
+            if self.device == "cuda":
+                print(f"[LocalTranscriber] CUDA library notice ({e}). Switching to multi-threaded CPU int8...")
+                self.device = "cpu"
+                self.compute_type = "int8"
+                self._model = WhisperModel(
+                    self.model_size,
+                    device="cpu",
+                    compute_type="int8",
+                    cpu_threads=self.cpu_threads,
+                )
+                segments_gen, info = self._model.transcribe(
+                    audio_np,
+                    language=language,
+                    word_timestamps=word_timestamps,
+                    beam_size=beam_size,
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=500),
+                )
+            else:
+                raise e
 
         all_segments: List[Dict[str, Any]] = []
         all_words: List[Dict[str, Any]] = []
@@ -155,6 +223,16 @@ class LocalTranscriber:
                     }
                     seg_words.append(word_dict)
                     all_words.append(word_dict)
+            elif not word_timestamps and segment.text:
+                # Approximate word timestamps from segment for coarse pass
+                raw_words = segment.text.strip().split()
+                dur_per_w = (segment.end - segment.start) / max(1, len(raw_words))
+                for j, rw in enumerate(raw_words):
+                    ws = segment.start + j * dur_per_w
+                    we = ws + dur_per_w
+                    w_dict = {"word": rw, "start": round(ws, 3), "end": round(we, 3), "probability": 1.0}
+                    seg_words.append(w_dict)
+                    all_words.append(w_dict)
 
             seg_dict = {
                 "id": idx,
@@ -173,10 +251,11 @@ class LocalTranscriber:
             if progress_callback and total_duration > 0:
                 pct = min(100.0, (segment.end / total_duration) * 100)
                 progress_callback({
-                    "stage": "transcribing",
+                    "stage": "transcribe_progress",
                     "percent": round(pct, 1),
                     "current_time": round(segment.end, 2),
                     "total_time": round(total_duration, 2),
+                    "message": f"Transcribing: {pct:.1f}% ({int(segment.end)}s/{int(total_duration)}s)",
                 })
 
         result: Dict[str, Any] = {
