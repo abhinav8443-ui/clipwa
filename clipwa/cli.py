@@ -327,6 +327,71 @@ def test():
     run_synthetic_test()
 
 
+@cli.command()
+@click.option("--timeout", default=300, help="Max seconds to wait for login.")
+def login(timeout):
+    """Sign in to your YouTube account once via persistent browser."""
+    print_banner()
+    uploader = YouTubeShortsUploader()
+    success = uploader.login_studio(timeout_sec=timeout)
+    if success:
+        console.print("[bold green]✅ YouTube Studio login saved successfully![/bold green]")
+    else:
+        console.print("[bold red]❌ Login was not completed or timed out.[/bold red]")
+
+
+@cli.command(name="upload-existing")
+@click.option("--privacy", type=click.Choice(["public", "unlisted", "private"]), default="public", help="YouTube visibility status.")
+@click.option("--summary", default=None, help="Path to pipeline_summary.json (defaults to output directory).")
+@click.option("--dry-run", is_flag=True, default=False, help="Simulate upload without publishing.")
+@click.option("--no-title-upgrade", is_flag=True, default=False, help="Skip AI Brain title upgrading.")
+def upload_existing(privacy, summary, dry_run, no_title_upgrade):
+    """Upload previously generated clips from output/ directly to YouTube Shorts."""
+    print_banner()
+    pipeline = ClipwaPipeline()
+
+    console.print(f"[bold cyan]Uploading existing Shorts from output directory ({privacy.upper()})...[/bold cyan]")
+
+    def on_progress(stage, message, extra=None):
+        if stage in ("upgrade_titles", "start_upload", "uploading_clip", "finished"):
+            console.print(f"[cyan]•[/cyan] {message}")
+        elif stage == "upload_error":
+            console.print(f"[bold red]✗[/bold red] {message}")
+
+    try:
+        updated_clips = pipeline.upload_existing_clips(
+            summary_path=summary,
+            privacy_status=privacy,
+            upgrade_titles=not no_title_upgrade,
+            dry_run=dry_run,
+            progress_callback=on_progress,
+        )
+
+        table = Table(title="Uploaded YouTube Shorts", show_header=True, header_style="bold magenta")
+        table.add_column("#", style="dim", width=4)
+        table.add_column("Upgraded Viral Title", style="bold white", width=36)
+        table.add_column("Duration", justify="right", width=10)
+        table.add_column("Virality", justify="center", width=10)
+        table.add_column("YouTube Link", style="cyan", width=34)
+
+        for clip in updated_clips:
+            res = clip.get("upload_result") or {}
+            url = res.get("video_url") or ("Uploaded" if res.get("status") == "uploaded" else (res.get("error") or "Failed"))
+            table.add_row(
+                str(clip["clip_id"]),
+                clip.get("youtube_title", ""),
+                f"{clip.get('duration', 0):.1f}s",
+                f"{clip.get('virality_score', 85)}%",
+                url,
+            )
+
+        console.print("\n")
+        console.print(table)
+        console.print("\n[bold green]✅ All existing clips processed successfully![/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error uploading existing clips:[/bold red] {e}")
+
+
 def main():
     cli()
 

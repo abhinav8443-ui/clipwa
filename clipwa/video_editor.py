@@ -3,6 +3,7 @@ Video editing, smart 9:16 reframing, face tracking, and subtitle burning using F
 Optimized for 10x-20x faster rendering with downscaled blurring, downscaled face sampling, and NVENC/superfast encoding.
 """
 
+import contextlib
 import math
 import os
 
@@ -19,6 +20,23 @@ import cv2
 import numpy as np
 
 from .config import Config
+
+
+@contextlib.contextmanager
+def suppress_c_stderr():
+    """Suppress C/C++ level stderr output (e.g. from LiteRT / MediaPipe / Abseil)."""
+    try:
+        null_fd = os.open(os.devnull, os.O_WRONLY)
+        orig_stderr_fd = os.dup(2)
+        os.dup2(null_fd, 2)
+        os.close(null_fd)
+        try:
+            yield
+        finally:
+            os.dup2(orig_stderr_fd, 2)
+            os.close(orig_stderr_fd)
+    except Exception:
+        yield
 
 
 class VideoEditor:
@@ -65,15 +83,16 @@ class VideoEditor:
         mp_model_path = str(self.models_dir / "blaze_face_short_range.tflite")
         if os.path.exists(mp_model_path) and self._mp_detector is None:
             try:
-                import mediapipe as mp
-                from mediapipe.tasks import python
-                from mediapipe.tasks.python import vision
+                with suppress_c_stderr():
+                    import mediapipe as mp
+                    from mediapipe.tasks import python
+                    from mediapipe.tasks.python import vision
 
-                base_options = python.BaseOptions(model_asset_path=mp_model_path)
-                options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.5)
-                self._mp_detector = vision.FaceDetector.create_from_options(options)
+                    base_options = python.BaseOptions(model_asset_path=mp_model_path)
+                    options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.5)
+                    self._mp_detector = vision.FaceDetector.create_from_options(options)
             except Exception as e:
-                print(f"[VideoEditor] Note: MediaPipe initialization notice: {e}")
+                pass
 
         # 2. OpenCV Haar Cascade Fallback
         cascade_path = str(self.models_dir / "haarcascade_frontalface_default.xml")
@@ -109,7 +128,8 @@ class VideoEditor:
                 import mediapipe as mp
                 frame_rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-                results = self._mp_detector.detect(mp_image)
+                with suppress_c_stderr():
+                    results = self._mp_detector.detect(mp_image)
                 if results and results.detections:
                     best_box = None
                     best_area = 0

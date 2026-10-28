@@ -283,3 +283,81 @@ class ClipwaPipeline:
 
         notify("finished", f"Pipeline complete! {len(processed_clips)} Shorts generated in {results['elapsed_seconds']}s.")
         return results
+
+    def upload_existing_clips(
+        self,
+        summary_path: Optional[str] = None,
+        privacy_status: str = "public",
+        upgrade_titles: bool = True,
+        dry_run: bool = False,
+        progress_callback: Optional[Callable[[str, str, Optional[Dict[str, Any]]], None]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Uploads clips that were already generated in the output directory.
+        Upgrades their titles using AI Brain if requested.
+        """
+        def notify(stage: str, message: str, extra: Optional[Dict[str, Any]] = None, **kwargs) -> None:
+            if progress_callback:
+                progress_callback(stage, message, extra or kwargs)
+
+        path = Path(summary_path) if summary_path else (self.output_dir / "pipeline_summary.json")
+        if not path.exists():
+            raise FileNotFoundError(f"No summary file found at '{path}'. Run 'clipwa process' first.")
+
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        clips = data.get("clips", [])
+        if not clips:
+            raise ValueError(f"No clips found in summary file '{path}'.")
+
+        if upgrade_titles:
+            notify("upgrade_titles", "Upgrading clip titles to high-CTR viral hooks using AI Brain...")
+            for clip in clips:
+                raw_text = clip.get("youtube_description", "") or clip.get("hook_text", "")
+                clip["youtube_title"] = self.ai_brain.generate_viral_title(raw_text)
+
+        notify("start_upload", f"Uploading {len(clips)} existing Shorts to YouTube ({privacy_status})...")
+
+        results = []
+        for idx, clip in enumerate(clips, 1):
+            file_path = clip.get("file_path", "")
+            if not os.path.exists(file_path):
+                alt_path = str(self.output_dir / clip.get("file_name", ""))
+                if os.path.exists(alt_path):
+                    file_path = alt_path
+                else:
+                    notify("skip_clip", f"Clip file not found: {file_path}")
+                    clip["upload_result"] = {"error": f"File not found: {file_path}"}
+                    results.append(clip)
+                    continue
+
+            title = clip.get("youtube_title", f"Short #{idx} #Shorts")
+            desc = clip.get("youtube_description", "#Shorts")
+            tags = clip.get("tags", ["shorts", "viral"])
+
+            notify("uploading_clip", f"Uploading [{idx}/{len(clips)}]: {title}...")
+
+            try:
+                res = self.uploader.upload_short(
+                    video_path=file_path,
+                    title=title,
+                    description=desc,
+                    tags=tags,
+                    privacy_status=privacy_status,
+                    dry_run=dry_run,
+                    progress_callback=lambda d: notify("upload_progress", "Uploading...", d),
+                )
+                clip["upload_result"] = res
+            except Exception as e:
+                clip["upload_result"] = {"error": str(e)}
+                notify("upload_error", f"Upload failed for Clip {idx}: {e}")
+
+            results.append(clip)
+
+        # Update summary file
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        notify("finished", f"Finished uploading {len(clips)} Shorts!")
+        return results
