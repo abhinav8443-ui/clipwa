@@ -2,8 +2,13 @@
 Rich Command-Line Interface for Clipwa.
 """
 
-import json
 import os
+# Silence C++ logging from TensorFlow Lite, MediaPipe, and Abseil
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["GLOG_minloglevel"] = "3"
+os.environ["ABSL_MIN_LOG_LEVEL"] = "3"
+
+import json
 import sys
 from pathlib import Path
 from typing import Optional

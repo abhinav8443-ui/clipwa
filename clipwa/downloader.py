@@ -25,6 +25,7 @@ class MediaDownloader:
         self.temp_dir = temp_dir or Config.TEMP_DIR
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.ffmpeg_path = Config.FFMPEG_PATH
+        self.ffprobe_path = Config.FFPROBE_PATH
         self.ffmpeg_dir = str(Config.BIN_DIR)
 
         # Ensure ffmpeg dir is in PATH for yt-dlp
@@ -205,11 +206,13 @@ class MediaDownloader:
     ) -> str:
         """
         Stage 2: Download ONLY the specific 30-60s viral segment using yt-dlp partial ranges.
+        Never invokes FFmpeg over the network. FFmpeg is only used on local disk files.
         If local file, uses FFmpeg to cut the section directly.
         """
+        dur = max(1.0, end_time - start_time)
+
         # If local file, use FFmpeg fast stream copy or re-encode
         if os.path.exists(url_or_path):
-            dur = end_time - start_time
             cmd = [
                 self.ffmpeg_path,
                 "-y",
@@ -226,11 +229,6 @@ class MediaDownloader:
             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             return output_path
 
-        # Remote URL: Download targeted section with a 1.0s buffer
-        buffer_start = max(0.0, start_time - 1.0)
-        buffer_end = end_time + 1.0
-        ranges = [(buffer_start, buffer_end)]
-
         def hook(d: Dict[str, Any]) -> None:
             if progress_callback and d.get("status") == "downloading":
                 total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
@@ -244,41 +242,161 @@ class MediaDownloader:
                     "message": f"Downloading clip section: {pct:.1f}%",
                 })
 
-        base_out = os.path.splitext(output_path)[0]
-        outtmpl = f"{base_out}.%(ext)s"
+        # Primary Method: 100% Native Python yt-dlp Fragment/Byte-Range Download
+        # force_keyframes_at_cuts=False ensures yt-dlp uses pure Python DASH fragment downloading
+        buffer_start = max(0.0, start_time - 2.0)
+        buffer_end = end_time + 2.0
+        ranges = [(buffer_start, buffer_end)]
+        offset = max(0.0, start_time - buffer_start)
 
-        ydl_opts = {
-            "format": "bv*[protocol^=http][height<=1080]+ba[protocol^=http]/bv*[height<=1080]+ba/b[height<=1080]/best",
-            "outtmpl": outtmpl,
-            "merge_output_format": "mp4",
+        temp_base = str(self.temp_dir / f"raw_section_{int(start_time)}_{int(end_time)}")
+        for old_f in glob.glob(f"{temp_base}*"):
+            try:
+                os.remove(old_f)
+            except Exception:
+                pass
+
+        primary_success = False
+        downloaded_raw = None
+
+        try:
+            ydl_opts = {
+                "format": "bv*[height<=1080]+ba/b[height<=1080]/best",
+                "outtmpl": f"{temp_base}.%(ext)s",
+                "download_ranges": download_range_func(None, ranges),
+                "force_keyframes_at_cuts": False,
+                "concurrent_fragment_downloads": 8,
+                "ffmpeg_location": self.ffmpeg_dir,
+                "overwrites": True,
+                "quiet": True,
+                "no_warnings": True,
+                "progress_hooks": [hook] if progress_callback else [],
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url_or_path])
+
+            cands = glob.glob(f"{temp_base}.*")
+            if cands:
+                for cand in cands:
+                    if cand.endswith((".mp4", ".mkv", ".webm", ".ts")):
+                        downloaded_raw = cand
+                        primary_success = True
+                        break
+        except Exception as e:
+            if progress_callback:
+                progress_callback({
+                    "stage": "download_notice",
+                    "message": f"Section range download notice ({e}). Switching to progressive fallback...",
+                })
+            primary_success = False
+
+        if primary_success and downloaded_raw and os.path.exists(downloaded_raw):
+            raw_dur = self._get_media_duration(downloaded_raw)
+            if raw_dur > dur + 0.5:
+                seek_time = min(offset, max(0.0, raw_dur - dur))
+            else:
+                seek_time = 0.0
+
+            trim_cmd = [
+                self.ffmpeg_path,
+                "-y",
+                "-ss",
+                f"{seek_time:.3f}",
+                "-i",
+                downloaded_raw,
+                "-t",
+                f"{dur:.3f}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "superfast",
+                "-c:a",
+                "aac",
+                output_path,
+            ]
+            subprocess.run(trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            try:
+                os.remove(downloaded_raw)
+            except Exception:
+                pass
+            return output_path
+
+        # Fallback Method: Pure Python progressive single-file stream download
+        fallback_base = str(self.temp_dir / f"fallback_stream_{int(start_time)}_{int(end_time)}")
+        for old_f in glob.glob(f"{fallback_base}*"):
+            try:
+                os.remove(old_f)
+            except Exception:
+                pass
+
+        fallback_opts = {
+            "format": "18/b[ext=mp4]/b",
+            "outtmpl": f"{fallback_base}.%(ext)s",
+            "external_downloader": None,
             "ffmpeg_location": self.ffmpeg_dir,
-            "download_ranges": download_range_func(None, ranges),
-            "concurrent_fragment_downloads": 8,
             "overwrites": True,
             "quiet": True,
             "no_warnings": True,
             "progress_hooks": [hook] if progress_callback else [],
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(fallback_opts) as ydl:
             ydl.download([url_or_path])
 
-        # Locate actual saved file
-        if os.path.exists(output_path):
-            return output_path
-
-        candidates = glob.glob(f"{base_out}.*")
-        for cand in candidates:
+        fb_cands = glob.glob(f"{fallback_base}.*")
+        downloaded_fb = None
+        for cand in fb_cands:
             if cand.endswith((".mp4", ".mkv", ".webm", ".ts")):
-                if not cand.endswith(".mp4"):
-                    # Fast remux to mp4
-                    cmd = [self.ffmpeg_path, "-y", "-i", cand, "-c", "copy", output_path]
-                    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    if p.returncode == 0 and os.path.exists(output_path):
-                        return output_path
-                return cand
+                downloaded_fb = cand
+                break
+
+        if not downloaded_fb or not os.path.exists(downloaded_fb):
+            raise RuntimeError(f"Failed to download video section for {url_or_path}")
+
+        # Local trim with FFmpeg on the local file
+        trim_cmd = [
+            self.ffmpeg_path,
+            "-y",
+            "-ss",
+            f"{start_time:.3f}",
+            "-i",
+            downloaded_fb,
+            "-t",
+            f"{dur:.3f}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "superfast",
+            "-c:a",
+            "aac",
+            output_path,
+        ]
+        subprocess.run(trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        try:
+            os.remove(downloaded_fb)
+        except Exception:
+            pass
 
         return output_path
+
+    def _get_media_duration(self, filepath: str) -> float:
+        """Probe media duration in seconds using ffprobe."""
+        try:
+            cmd = [
+                self.ffprobe_path or "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                filepath,
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            return float(res.stdout.strip())
+        except Exception:
+            return 0.0
 
     def _parse_subtitle_file(self, sub_path: str) -> Dict[str, Any]:
         """Parse YouTube json3 or VTT/SRT subtitles into standard transcript data."""

@@ -5,6 +5,12 @@ Optimized for 10x-20x faster rendering with downscaled blurring, downscaled face
 
 import math
 import os
+
+# Silence C++ logging from TensorFlow Lite, MediaPipe, and Abseil
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["GLOG_minloglevel"] = "3"
+os.environ["ABSL_MIN_LOG_LEVEL"] = "3"
+
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple

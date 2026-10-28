@@ -8,6 +8,31 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Silence C++ logging from TensorFlow Lite, MediaPipe, and Abseil before other modules import them
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["GLOG_minloglevel"] = "3"
+os.environ["ABSL_MIN_LOG_LEVEL"] = "3"
+
+
+def _load_env_file(path: Path) -> None:
+    """Safely parse and populate os.environ from a .env file without external dependencies."""
+    if not path.is_file():
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip().strip("'\"")
+                    if key and key not in os.environ:
+                        os.environ[key] = val
+    except Exception:
+        pass
+
 
 class Config:
     """Clipwa central configuration."""
@@ -19,6 +44,10 @@ class Config:
     MODELS_DIR = BASE_DIR / "models"
     TEMP_DIR = BASE_DIR / "temp"
     OUTPUT_DIR = BASE_DIR / "output"
+
+    # Load .env files: first check project root, then check current working directory
+    _load_env_file(BASE_DIR / ".env")
+    _load_env_file(Path.cwd() / ".env")
 
     # API Keys & Endpoints
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
@@ -43,8 +72,9 @@ class Config:
     MAX_CLIP_DURATION: float = 60.0
     DEFAULT_MAX_CLIPS: int = 3
 
-    # FFmpeg executable
+    # FFmpeg & FFprobe executables
     FFMPEG_PATH: str = ""
+    FFPROBE_PATH: str = ""
 
     @classmethod
     def setup_environment(cls) -> None:
@@ -57,26 +87,30 @@ class Config:
         # Set matplotlib cache directory to temp to prevent permission warnings
         os.environ["MPLCONFIGDIR"] = str(cls.TEMP_DIR)
 
-        # Find FFmpeg executable
-        ffmpeg_bin = cls._find_ffmpeg()
-        cls.FFMPEG_PATH = ffmpeg_bin
+        # Find FFmpeg & FFprobe executables
+        cls.FFMPEG_PATH = cls._find_ffmpeg()
+        cls.FFPROBE_PATH = cls._find_ffprobe()
 
-        # Make sure directory containing FFmpeg is in system PATH
-        if ffmpeg_bin:
-            ffmpeg_dir = str(Path(ffmpeg_bin).parent)
-            current_path = os.environ.get("PATH", "")
-            if ffmpeg_dir not in current_path:
-                os.environ["PATH"] = f"{ffmpeg_dir}{os.pathsep}{current_path}"
+        # Always prepend local bin directory to system PATH
+        bin_dir_str = str(cls.BIN_DIR)
+        current_path = os.environ.get("PATH", "")
+        if bin_dir_str not in current_path.split(os.pathsep):
+            os.environ["PATH"] = f"{bin_dir_str}{os.pathsep}{current_path}"
 
     @classmethod
     def _find_ffmpeg(cls) -> str:
         """Find the best available FFmpeg binary."""
-        # 1. Check clipwa/bin directory
+        # 1. Check clipwa/bin directory (full build)
         local_bin_exe = cls.BIN_DIR / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
         if local_bin_exe.exists() and os.access(str(local_bin_exe), os.X_OK | os.R_OK):
             return str(local_bin_exe)
 
-        # 2. Check imageio_ffmpeg
+        # 2. Check system PATH
+        which_ffmpeg = shutil.which("ffmpeg")
+        if which_ffmpeg:
+            return which_ffmpeg
+
+        # 3. Check imageio_ffmpeg fallback
         try:
             import imageio_ffmpeg
             imgio_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -85,13 +119,20 @@ class Config:
         except Exception:
             pass
 
-        # 3. Check system PATH
-        which_ffmpeg = shutil.which("ffmpeg")
-        if which_ffmpeg:
-            return which_ffmpeg
-
-        # Fallback to simple command name
         return "ffmpeg"
+
+    @classmethod
+    def _find_ffprobe(cls) -> str:
+        """Find the best available FFprobe binary."""
+        local_bin_exe = cls.BIN_DIR / ("ffprobe.exe" if sys.platform == "win32" else "ffprobe")
+        if local_bin_exe.exists() and os.access(str(local_bin_exe), os.X_OK | os.R_OK):
+            return str(local_bin_exe)
+
+        which_ffprobe = shutil.which("ffprobe")
+        if which_ffprobe:
+            return which_ffprobe
+
+        return "ffprobe"
 
 
 # Run setup on import
