@@ -59,6 +59,7 @@ class YouTubeShortsUploader:
                 user_data_dir=str(self.user_data_dir),
                 headless=False,
                 args=browser_args,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                 viewport=None,
             )
             page = context.new_page() if not context.pages else context.pages[0]
@@ -66,6 +67,15 @@ class YouTubeShortsUploader:
             print("[YouTubeUploader] Navigating to https://studio.youtube.com ...")
             try:
                 page.goto("https://studio.youtube.com", wait_until="load", timeout=60000)
+            except Exception:
+                pass
+
+            # Handle browser upgrade notice if shown
+            try:
+                skip_btn = page.locator("text='SKIP TO YOUTUBE STUDIO', text='Skip to YouTube Studio'")
+                if skip_btn.count() > 0 and skip_btn.first.is_visible():
+                    skip_btn.first.click()
+                    page.wait_for_timeout(3000)
             except Exception:
                 pass
 
@@ -153,6 +163,7 @@ class YouTubeShortsUploader:
                 user_data_dir=str(self.user_data_dir),
                 headless=False,
                 args=browser_args,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                 viewport=None,
             )
             page = context.new_page() if not context.pages else context.pages[0]
@@ -160,6 +171,15 @@ class YouTubeShortsUploader:
             # 1. Check Studio Access
             try:
                 page.goto("https://studio.youtube.com", wait_until="load", timeout=60000)
+            except Exception:
+                pass
+
+            # Handle browser upgrade notice if shown
+            try:
+                skip_btn = page.locator("text='SKIP TO YOUTUBE STUDIO', text='Skip to YouTube Studio'")
+                if skip_btn.count() > 0 and skip_btn.first.is_visible():
+                    skip_btn.first.click()
+                    page.wait_for_timeout(3000)
             except Exception:
                 pass
 
@@ -182,47 +202,36 @@ class YouTubeShortsUploader:
             page.wait_for_timeout(3000)
 
             if progress_callback:
-                progress_callback({"stage": "upload", "message": "Selecting video file in YouTube Studio..."})
+                progress_callback({"stage": "upload", "message": "Opening upload dialog in YouTube Studio..."})
 
-            # 2. Trigger File Upload
-            file_input = None
+            # 2. Trigger File Upload Picker
             try:
-                # Direct check for file input
-                if page.locator("input[type='file']").count() > 0:
-                    file_input = page.locator("input[type='file']").first
-                else:
-                    # Click Create button
-                    create_btn = page.locator("#create-icon, ytcp-button#create-icon, button[aria-label='Create']").first
-                    if create_btn.is_visible():
-                        create_btn.click()
-                        page.wait_for_timeout(1000)
-                        upload_item = page.locator("ytcp-text-menu-item:has-text('Upload videos'), #text-item-0").first
-                        if upload_item.is_visible():
-                            upload_item.click()
-                            page.wait_for_timeout(1500)
-                    file_input = page.locator("input[type='file']").first
+                create_btn = page.locator('#create-icon, button[aria-label="Create"], ytcp-button#create-icon').first
+                create_btn.wait_for(state="visible", timeout=20000)
+                create_btn.click()
+                page.wait_for_timeout(1000)
+
+                upload_item = page.locator("ytcp-text-menu-item:has-text('Upload videos'), #text-item-0").first
+                upload_item.wait_for(state="visible", timeout=10000)
+                upload_item.click()
+                page.wait_for_timeout(2000)
             except Exception as e:
-                print(f"[YouTubeUploader] Notice triggering upload picker: {e}")
+                print(f"[YouTubeUploader] Notice triggering Create menu: {e}")
 
-            if not file_input or file_input.count() == 0:
-                # Direct navigation fallback to upload dialog
-                page.goto("https://studio.youtube.com/channel/upload", wait_until="load", timeout=45000)
-                page.wait_for_timeout(3000)
-                file_input = page.locator("input[type='file']").first
-
+            file_input = page.locator("input[type='file']").first
+            file_input.wait_for(state="attached", timeout=20000)
             file_input.set_input_files(str(video_path))
 
-            # 3. Wait for Upload Dialog
+            # 3. Wait for Upload Dialog & Title Input
             if progress_callback:
                 progress_callback({"stage": "upload", "message": "Uploading video file to YouTube Studio..."})
 
-            page.wait_for_selector("ytcp-uploads-dialog, #dialog", timeout=60000)
-            page.wait_for_timeout(4000)
+            title_box = page.locator("#title-textarea #textbox, #textbox[aria-label*='title' i]").first
+            title_box.wait_for(state="visible", timeout=60000)
+            page.wait_for_timeout(2000)
 
             # 4. Fill Title
             try:
-                title_box = page.locator("#title-textarea #textbox, #textbox[aria-label*='title' i]").first
-                title_box.wait_for(state="visible", timeout=30000)
                 title_box.click()
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")

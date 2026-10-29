@@ -118,6 +118,18 @@ def run_synthetic_test():
     print("      Synthetic test video created successfully.")
 
     print("\n[2/4] Initializing Clipwa Pipeline...")
+    # Backup existing real summary if present
+    summary_path = Config.OUTPUT_DIR / "pipeline_summary.json"
+    backup_content = None
+    if summary_path.exists():
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                raw_json = f.read()
+                if "BV7QRw8wtjs" in raw_json or not json.loads(raw_json).get("metadata", {}).get("is_local", True):
+                    backup_content = raw_json
+        except Exception:
+            pass
+
     pipeline = ClipwaPipeline(
         llm_provider="heuristic",  # Use heuristic to run 100% offline
         whisper_model="tiny",
@@ -134,6 +146,14 @@ def run_synthetic_test():
         upload_to_youtube=True,
         dry_run_upload=True,
     )
+
+    # Restore real summary if backed up
+    if backup_content:
+        try:
+            with open(summary_path, "w", encoding="utf-8") as f:
+                f.write(backup_content)
+        except Exception:
+            pass
 
     print("\n[4/4] Verifying pipeline outputs...")
     clips = result.get("clips", [])
