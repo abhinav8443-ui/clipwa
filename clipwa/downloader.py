@@ -313,6 +313,8 @@ class MediaDownloader:
                 "superfast",
                 "-c:a",
                 "aac",
+                "-movflags",
+                "+faststart",
                 output_path,
             ]
             subprocess.run(trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
@@ -370,6 +372,8 @@ class MediaDownloader:
             "superfast",
             "-c:a",
             "aac",
+            "-movflags",
+            "+faststart",
             output_path,
         ]
         subprocess.run(trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)

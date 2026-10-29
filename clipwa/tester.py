@@ -91,6 +91,8 @@ def generate_synthetic_video(output_mp4: str, duration: int = 35) -> str:
         "libx264",
         "-c:a",
         "aac",
+        "-movflags",
+        "+faststart",
         "-shortest",
         output_mp4,
     ]

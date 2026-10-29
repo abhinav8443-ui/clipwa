@@ -345,7 +345,8 @@ def login(timeout):
 @click.option("--summary", default=None, help="Path to pipeline_summary.json (defaults to output directory).")
 @click.option("--dry-run", is_flag=True, default=False, help="Simulate upload without publishing.")
 @click.option("--no-title-upgrade", is_flag=True, default=False, help="Skip AI Brain title upgrading.")
-def upload_existing(privacy, summary, dry_run, no_title_upgrade):
+@click.option("--force", "-f", is_flag=True, default=False, help="Re-upload even if already uploaded.")
+def upload_existing(privacy, summary, dry_run, no_title_upgrade, force):
     """Upload previously generated clips from output/ directly to YouTube Shorts."""
     print_banner()
     pipeline = ClipwaPipeline()
@@ -353,8 +354,10 @@ def upload_existing(privacy, summary, dry_run, no_title_upgrade):
     console.print(f"[bold cyan]Uploading existing Shorts from output directory ({privacy.upper()})...[/bold cyan]")
 
     def on_progress(stage, message, extra=None):
-        if stage in ("upgrade_titles", "start_upload", "uploading_clip", "finished"):
+        if stage in ("upgrade_titles", "start_upload", "uploading_clip", "skip_clip", "finished"):
             console.print(f"[cyan]•[/cyan] {message}")
+        elif stage == "upload_progress":
+            console.print(f"[yellow]•[/yellow] {message}")
         elif stage == "upload_error":
             console.print(f"[bold red]✗[/bold red] {message}")
 
@@ -363,6 +366,7 @@ def upload_existing(privacy, summary, dry_run, no_title_upgrade):
             summary_path=summary,
             privacy_status=privacy,
             upgrade_titles=not no_title_upgrade,
+            force=force,
             dry_run=dry_run,
             progress_callback=on_progress,
         )

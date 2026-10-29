@@ -13,4 +13,5 @@ output/*
 .env
 token.json
 client_secrets.json
+youtube_auth_profile/
 .cache/

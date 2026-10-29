@@ -289,6 +289,7 @@ class ClipwaPipeline:
         summary_path: Optional[str] = None,
         privacy_status: str = "public",
         upgrade_titles: bool = True,
+        force: bool = False,
         dry_run: bool = False,
         progress_callback: Optional[Callable[[str, str, Optional[Dict[str, Any]]], None]] = None,
     ) -> List[Dict[str, Any]]:
@@ -342,50 +343,56 @@ class ClipwaPipeline:
         if upgrade_titles:
             notify("upgrade_titles", "Upgrading clip titles to high-CTR viral hooks using AI Brain...")
             for clip in clips:
+                # Keep existing upgraded titles if already set and uploaded
+                if clip.get("upload_result", {}).get("status") == "uploaded" and not force:
+                    continue
                 raw_text = clip.get("youtube_description", "") or clip.get("hook_text", "")
                 clip["youtube_title"] = self.ai_brain.generate_viral_title(raw_text)
 
-        notify("start_upload", f"Uploading {len(clips)} existing Shorts to YouTube ({privacy_status})...")
+        notify("start_upload", f"Uploading existing Shorts to YouTube ({privacy_status})...")
 
-        results = []
+        # Validate file paths
+        valid_clips = []
         for idx, clip in enumerate(clips, 1):
             file_path = clip.get("file_path", "")
             if not os.path.exists(file_path):
                 alt_path = str(self.output_dir / clip.get("file_name", ""))
                 if os.path.exists(alt_path):
-                    file_path = alt_path
+                    clip["file_path"] = alt_path
+                    valid_clips.append(clip)
                 else:
                     notify("skip_clip", f"Clip file not found: {file_path}")
                     clip["upload_result"] = {"error": f"File not found: {file_path}"}
-                    results.append(clip)
-                    continue
+            else:
+                valid_clips.append(clip)
 
-            title = clip.get("youtube_title", f"Short #{idx} #Shorts")
-            desc = clip.get("youtube_description", "#Shorts")
-            tags = clip.get("tags", ["shorts", "viral"])
+        # Filter out already uploaded clips unless force=True
+        clips_to_upload = []
+        for c in valid_clips:
+            res = c.get("upload_result") or {}
+            if not force and res.get("status") == "uploaded":
+                notify("skip_clip", f"Clip already published: {c.get('youtube_title')} ({res.get('video_url')})")
+            else:
+                clips_to_upload.append(c)
 
-            notify("uploading_clip", f"Uploading [{idx}/{len(clips)}]: {title}...")
+        if clips_to_upload:
+            def upload_cb(d: Dict[str, Any]) -> None:
+                stg = d.get("stage", "upload_progress")
+                msg = d.get("message", "Uploading...")
+                notify(stg, msg, d)
 
-            try:
-                res = self.uploader.upload_short(
-                    video_path=file_path,
-                    title=title,
-                    description=desc,
-                    tags=tags,
-                    privacy_status=privacy_status,
-                    dry_run=dry_run,
-                    progress_callback=lambda d: notify("upload_progress", "Uploading...", d),
-                )
-                clip["upload_result"] = res
-            except Exception as e:
-                clip["upload_result"] = {"error": str(e)}
-                notify("upload_error", f"Upload failed for Clip {idx}: {e}")
-
-            results.append(clip)
+            self.uploader.upload_multiple(
+                clips=clips_to_upload,
+                privacy_status=privacy_status,
+                dry_run=dry_run,
+                progress_callback=upload_cb,
+            )
+        else:
+            notify("finished", "All clips are already uploaded to YouTube!")
 
         # Update summary file
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
         notify("finished", f"Finished uploading {len(clips)} Shorts!")
-        return results
+        return clips
