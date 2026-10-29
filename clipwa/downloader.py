@@ -261,7 +261,7 @@ class MediaDownloader:
 
         try:
             ydl_opts = {
-                "format": "bv*[height<=1080]+ba/b[height<=1080]/best",
+                "format": "bv*[height<=1080][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=1080]+ba/b[height<=1080]/best",
                 "outtmpl": f"{temp_base}.%(ext)s",
                 "download_ranges": download_range_func(None, ranges),
                 "force_keyframes_at_cuts": False,
@@ -333,7 +333,7 @@ class MediaDownloader:
                 pass
 
         fallback_opts = {
-            "format": "18/b[ext=mp4]/b",
+            "format": "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]/18/b",
             "outtmpl": f"{fallback_base}.%(ext)s",
             "external_downloader": None,
             "ffmpeg_location": self.ffmpeg_dir,

@@ -33,8 +33,8 @@ console = Console()
 
 if sys.platform == "win32":
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
+        sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
     except Exception:
         pass
 
@@ -338,6 +338,19 @@ def login(timeout):
         console.print("[bold green]✅ YouTube Studio login saved successfully![/bold green]")
     else:
         console.print("[bold red]❌ Login was not completed or timed out.[/bold red]")
+
+
+@cli.command(name="switch-channel")
+@click.option("--timeout", default=300, help="Max seconds to wait for channel selection.")
+def switch_channel_cmd(timeout):
+    """Switch active YouTube channel via channel switcher."""
+    print_banner()
+    uploader = YouTubeShortsUploader()
+    res = uploader.switch_channel(timeout_sec=timeout)
+    if res.get("status") == "success":
+        console.print(f"[bold green]✅ Active channel updated to: {res.get('channel_name', 'Active Channel')} ({res.get('channel_id', 'ID')})[/bold green]")
+    else:
+        console.print("[bold red]❌ Channel switch was not completed or timed out.[/bold red]")
 
 
 @cli.command(name="upload-existing")

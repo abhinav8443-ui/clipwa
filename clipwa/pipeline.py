@@ -344,7 +344,7 @@ class ClipwaPipeline:
             notify("upgrade_titles", "Upgrading clip titles to high-CTR viral hooks using AI Brain...")
             for clip in clips:
                 # Keep existing upgraded titles if already set and uploaded
-                if clip.get("upload_result", {}).get("status") == "uploaded" and not force:
+                if (clip.get("upload_result") or {}).get("status") == "uploaded" and not force:
                     continue
                 raw_text = clip.get("youtube_description", "") or clip.get("hook_text", "")
                 clip["youtube_title"] = self.ai_brain.generate_viral_title(raw_text)

@@ -1,5 +1,7 @@
 """
 Dynamic word-by-word animated subtitle generator using pysubs2 (Alex Hormozi / OpusClip style).
+Upgraded for 1080x1920 canvas with massive bold fonts (Impact/Arial Black 92px),
+thick 7px black outline, 4px drop shadow, and punchy pop-in scale animation.
 """
 
 import os
@@ -13,54 +15,54 @@ from .config import Config
 
 
 class SubtitleGenerator:
-    """Generates engaging ASS subtitle files with word-level highlight animations."""
+    """Generates massive, eye-catching ASS subtitle files with word-level highlight animations."""
 
     THEMES = {
         "hormozi_yellow": {
-            "active_color": "&H002BF7&",      # Bright Golden Yellow (BGR in ASS)
-            "inactive_color": "&HFFFFFF&",    # Crisp White
-            "outline_color": "&H000000&",     # Pure Black Outline
-            "font_size": 22,
+            "active_color": "&H0000FFFF&",    # Bright Neon Yellow (BGR in ASS: B=00, G=FF, R=FF)
+            "inactive_color": "&H00FFFFFF&",  # Crisp White
+            "outline_color": "&H00000000&",   # Pure Black
+            "font_size": 92,
         },
         "neon_cyan": {
-            "active_color": "&HFFFF00&",      # Neon Cyan
-            "inactive_color": "&HFFFFFF&",
-            "outline_color": "&H000000&",
-            "font_size": 22,
+            "active_color": "&H00FFFF00&",    # Neon Cyan (BGR in ASS)
+            "inactive_color": "&H00FFFFFF&",
+            "outline_color": "&H00000000&",
+            "font_size": 92,
         },
         "emerald_green": {
-            "active_color": "&H33FF33&",      # Neon Lime/Green
-            "inactive_color": "&HFFFFFF&",
-            "outline_color": "&H000000&",
-            "font_size": 22,
+            "active_color": "&H0033FF33&",    # Neon Lime/Green (BGR in ASS)
+            "inactive_color": "&H00FFFFFF&",
+            "outline_color": "&H00000000&",
+            "font_size": 92,
         },
         "hot_pink": {
-            "active_color": "&HD214FF&",      # Vivid Pink
-            "inactive_color": "&HFFFFFF&",
-            "outline_color": "&H000000&",
-            "font_size": 22,
+            "active_color": "&H00D214FF&",    # Vivid Pink
+            "inactive_color": "&H00FFFFFF&",
+            "outline_color": "&H00000000&",
+            "font_size": 92,
         },
         "clean_white": {
-            "active_color": "&HFFFFFF&",
-            "inactive_color": "&HA0A0A0&",
-            "outline_color": "&H000000&",
-            "font_size": 22,
+            "active_color": "&H00FFFFFF&",
+            "inactive_color": "&H00A0A0A0&",
+            "outline_color": "&H00000000&",
+            "font_size": 92,
         },
     }
 
     def __init__(
         self,
         theme: str = "hormozi_yellow",
-        font_name: str = "Arial Black",
+        font_name: str = "Impact",
         all_caps: bool = True,
         words_per_line: int = 3,
-        position: str = "lower_third",  # "lower_third" or "center"
+        position: str = "lower_third",
     ):
         self.theme_name = theme if theme in self.THEMES else "hormozi_yellow"
         self.theme = self.THEMES[self.theme_name]
-        self.font_name = font_name
+        self.font_name = font_name or "Impact"
         self.all_caps = all_caps
-        self.words_per_line = max(1, min(5, words_per_line))
+        self.words_per_line = max(1, min(3, words_per_line))  # Tight 2-3 words max per card
         self.position = position
 
     def generate_ass(
@@ -72,32 +74,35 @@ class SubtitleGenerator:
     ) -> str:
         """
         Generate ASS subtitle file for a specific time window [clip_start, clip_end].
-        Timestamps are shifted so that clip_start becomes 0ms.
+        Explicitly configured for 1080x1920 PlayRes with massive size-92 font,
+        thick 7.0 outline, 4.0 shadow, and punchy pop-in animation tag.
         """
         subs = SSAFile()
         subs.info["ScriptType"] = "v4.00+"
-        subs.info["PlayResX"] = str(Config.TARGET_WIDTH)
-        subs.info["PlayResY"] = str(Config.TARGET_HEIGHT)
+        # Explicit 1080x1920 PlayRes so font sizes scale accurately
+        subs.info["PlayResX"] = "1080"
+        subs.info["PlayResY"] = "1920"
 
-        # Base style
+        # Base style: Massive Hormozi styling
         style = SSAStyle()
         style.fontname = self.font_name
-        style.fontsize = self.theme["font_size"]
+        style.fontsize = float(self.theme["font_size"])  # 92.0
         style.bold = True
         style.italic = False
         style.primarycolor = Color(255, 255, 255)
         style.outlinecolor = Color(0, 0, 0)
-        style.backcolor = Color(0, 0, 0, 128)
-        style.outline = 3.5
-        style.shadow = 1.5
+        style.backcolor = Color(0, 0, 0, 160)
+        style.outline = 7.0   # Deep, crisp black border
+        style.shadow = 4.0    # Solid drop shadow for maximum readability
+        style.spacing = 1.0
 
         if self.position == "center":
             style.alignment = Alignment.MIDDLE_CENTER
             style.marginv = 0
         else:
-            # Lower-third placed above YouTube Shorts bottom action bar
+            # Placed right in the viewer's eye-line at MarginV=480, safely above Shorts overlay
             style.alignment = Alignment.BOTTOM_CENTER
-            style.marginv = 380
+            style.marginv = 480
 
         subs.styles["Default"] = style
 
@@ -124,11 +129,10 @@ class SubtitleGenerator:
                 })
 
         if not clip_words:
-            # Return empty valid ASS file
             subs.save(output_path)
             return output_path
 
-        # Group words into cards of `words_per_line`
+        # Group words into tight cards of 2 to 3 words
         chunks: List[List[Dict[str, Any]]] = []
         for i in range(0, len(clip_words), self.words_per_line):
             chunks.append(clip_words[i : i + self.words_per_line])
@@ -136,16 +140,15 @@ class SubtitleGenerator:
         active_col = self.theme["active_color"]
         inactive_col = self.theme["inactive_color"]
 
-        for chunk in chunks:
-            chunk_start = chunk[0]["start_ms"]
-            chunk_end = chunk[-1]["end_ms"]
+        # Pop-in scale animation tag: punches in from 115% to 100% in 120ms
+        pop_anim = r"{\fscx115\fscy115\t(0,120,\fscx100\fscy100)}"
 
+        for chunk in chunks:
             # For each word in this chunk, create a sub-event where that word is highlighted
             for i, active_word in enumerate(chunk):
                 w_start = active_word["start_ms"]
                 w_end = active_word["end_ms"]
 
-                # Ensure non-zero duration
                 if w_end <= w_start:
                     w_end = w_start + 150
 
@@ -153,12 +156,12 @@ class SubtitleGenerator:
                 for j, other_word in enumerate(chunk):
                     w_text = other_word["word"]
                     if i == j:
-                        # Highlighted active word with gentle scale pop
-                        line_parts.append(f"{{\\c{active_col}\\fscx108\\fscy108}}{w_text}{{\\c{inactive_col}\\fscx100\\fscy100}}")
+                        # Spoken active word highlighted with slight extra emphasis
+                        line_parts.append(f"{{\\c{active_col}\\fscx106\\fscy106}}{w_text}{{\\c{inactive_col}\\fscx100\\fscy100}}")
                     else:
                         line_parts.append(f"{{\\c{inactive_col}}}{w_text}")
 
-                display_text = " ".join(line_parts)
+                display_text = f"{pop_anim} " + " ".join(line_parts)
 
                 event = SSAEvent(
                     start=w_start,

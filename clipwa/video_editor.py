@@ -240,6 +240,18 @@ class VideoEditor:
             "orig_h": orig_h,
         }
 
+    def _has_audio_stream(self, video_path: str) -> bool:
+        """Check if video file contains at least one audio stream."""
+        try:
+            cmd = [
+                self.ffmpeg_path,
+                "-i", video_path,
+            ]
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            return "Audio:" in p.stderr
+        except Exception:
+            return True
+
     def render_clip(
         self,
         video_path: str,
@@ -252,7 +264,8 @@ class VideoEditor:
     ) -> str:
         """
         Cut, reframe into 9:16 vertical (1080x1920), burn subtitles, and save final MP4.
-        Uses 8x faster downscale-blur-upscale filter chain and NVENC/superfast encoding.
+        Upgraded with unsharp mask sharpening, contrast boost, high-bitrate 1080p CRF 18 render,
+        0.0s Hook SFX, background retention tune, and broadcast audio compression.
         """
         output_path = str(self.output_dir / output_filename)
         duration = end_time - start_time
@@ -263,21 +276,25 @@ class VideoEditor:
 
         filter_parts: List[str] = []
 
+        # Video filters with studio-grade sharpening and contrast boost
+        enhancement = "unsharp=3:3:0.6:3:3:0.0,eq=saturation=1.08:contrast=1.03"
         if chosen_layout == "face_track" and "crop_w" in framing:
             cw = framing["crop_w"]
             ch = framing["crop_h"]
             cx = framing["crop_x"]
             cy = framing["crop_y"]
-            base_filter = f"[0:v]crop={cw}:{ch}:{cx}:{cy},scale={Config.TARGET_WIDTH}:{Config.TARGET_HEIGHT}:flags=lanczos[scaled]"
+            base_filter = (
+                f"[0:v]crop={cw}:{ch}:{cx}:{cy},"
+                f"scale={Config.TARGET_WIDTH}:{Config.TARGET_HEIGHT}:flags=lanczos,"
+                f"{enhancement}[scaled]"
+            )
             current_v = "[scaled]"
         else:
-            # High-speed blurred background stack layout:
-            # Downscale background to 270x480, blur with gblur, then upscale to 1080x1920
-            # Foreground is source video scaled to width 1080, centered
+            # High-speed blurred background stack layout with crisp sharpened foreground
             base_filter = (
                 f"[0:v]scale=270:480:force_original_aspect_ratio=increase,"
                 f"crop=270:480,gblur=sigma=15,scale={Config.TARGET_WIDTH}:{Config.TARGET_HEIGHT}[bg]; "
-                f"[0:v]scale={Config.TARGET_WIDTH}:-2[fg]; "
+                f"[0:v]scale={Config.TARGET_WIDTH}:-2,{enhancement}[fg]; "
                 f"[bg][fg]overlay=(W-w)/2:(H-h)/2[stacked]"
             )
             current_v = "[stacked]"
@@ -294,25 +311,63 @@ class VideoEditor:
         else:
             final_map_v = current_v
 
+        # Audio mixing: Voice compressor + Hook SFX at 0.0s + Looping background tune
+        hook_sfx_path = Config.BASE_DIR / "assets" / "audio" / "hook_sfx.wav"
+        bg_tune_path = Config.BASE_DIR / "assets" / "audio" / "bg_tune.wav"
+        has_audio_assets = hook_sfx_path.exists() and bg_tune_path.exists()
+        has_source_audio = self._has_audio_stream(video_path)
+
+        extra_audio_inputs: List[str] = []
+        if has_audio_assets and has_source_audio:
+            extra_audio_inputs = [
+                "-i", str(hook_sfx_path),
+                "-stream_loop", "-1",
+                "-i", str(bg_tune_path),
+            ]
+            audio_filter = (
+                f"[0:a]highpass=f=80,acompressor=threshold=-18dB:ratio=3:attack=15:release=150,loudnorm=I=-14:TP=-1.5:LRA=11[voice]; "
+                f"[1:a]volume=0.45[hook]; "
+                f"[2:a]volume=0.10[bg]; "
+                f"[voice][hook][bg]amix=inputs=3:duration=first:dropout_transition=2[outa]"
+            )
+            filter_parts.append(audio_filter)
+            final_map_a = "[outa]"
+        elif has_source_audio:
+            audio_filter = (
+                f"[0:a]highpass=f=80,acompressor=threshold=-18dB:ratio=3:attack=15:release=150,loudnorm=I=-14:TP=-1.5:LRA=11[outa]"
+            )
+            filter_parts.append(audio_filter)
+            final_map_a = "[outa]"
+        else:
+            final_map_a = None
+
         filter_complex = "; ".join(filter_parts)
 
-        # Video encoder selection: NVENC if available, else libx264 superfast
+        # High-quality 1080p encoding settings (CRF 18 / 8 Mbps)
         has_nvenc = self._supports_nvenc()
         if has_nvenc:
             codec_flags = [
                 "-c:v", "h264_nvenc",
                 "-preset", "p4",
-                "-cq", "22",
+                "-cq", "19",
+                "-b:v", "8M",
+                "-maxrate", "10M",
+                "-bufsize", "16M",
                 "-pix_fmt", "yuv420p",
             ]
         else:
             codec_flags = [
                 "-c:v", "libx264",
-                "-preset", "superfast",
+                "-preset", "fast",
                 "-threads", "0",
-                "-crf", "20",
+                "-crf", "18",
+                "-b:v", "8M",
+                "-maxrate", "10M",
+                "-bufsize", "16M",
                 "-pix_fmt", "yuv420p",
             ]
+
+        audio_maps = ["-map", final_map_a] if final_map_a else ["-map", "0:a?"]
 
         cmd = [
             self.ffmpeg_path,
@@ -320,9 +375,10 @@ class VideoEditor:
             "-ss", f"{start_time:.3f}",
             "-t", f"{duration:.3f}",
             "-i", video_path,
+            *extra_audio_inputs,
             "-filter_complex", filter_complex,
             "-map", final_map_v,
-            "-map", "0:a?",
+            *audio_maps,
             *codec_flags,
             "-c:a", "aac",
             "-b:a", "192k",

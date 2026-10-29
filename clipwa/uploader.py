@@ -15,6 +15,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config
 
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 
 class YouTubeShortsUploader:
     """Manages YouTube Shorts authentication and uploads via API or Playwright Studio automation."""
@@ -109,6 +117,229 @@ class YouTubeShortsUploader:
             page.wait_for_timeout(3000)
             context.close()
             return True
+
+    def _extract_channel_info(self, page) -> Tuple[Optional[str], Optional[str]]:
+        """Extract active channel ID and channel name from page context."""
+        cid = None
+        cname = None
+
+        try:
+            cur_url = page.url
+            id_m = re.search(r"channel/(UC[a-zA-Z0-9_-]+)", cur_url)
+            if id_m:
+                cid = id_m.group(1)
+        except Exception:
+            pass
+
+        if not cid:
+            try:
+                eval_cid = page.evaluate("""
+                    () => {
+                        try {
+                            if (window.ytcfg && window.ytcfg.get) {
+                                return window.ytcfg.get('CHANNEL_ID') || (window.ytcfg.data_ && window.ytcfg.data_.CHANNEL_ID);
+                            }
+                        } catch(e) {}
+                        const meta = document.querySelector('meta[itemprop="channelId"], meta[property="og:url"]');
+                        if (meta && meta.content) {
+                            const m = meta.content.match(/channel\\/(UC[a-zA-Z0-9_-]+)/);
+                            if (m) return m[1];
+                        }
+                        return null;
+                    }
+                """)
+                if eval_cid:
+                    cid = eval_cid
+            except Exception:
+                pass
+
+        for name_sel in ["#channel-name", "#entity-name", ".channel-name", "ytcp-entity-info #entity-name", "#owner-name", "ytd-channel-name"]:
+            try:
+                loc = page.locator(name_sel).first
+                if loc.is_visible():
+                    txt = loc.inner_text().strip()
+                    if txt:
+                        cname = txt
+                        break
+            except Exception:
+                pass
+
+        return cid, cname
+
+    def switch_channel(self, timeout_sec: int = 600) -> Dict[str, Any]:
+        """
+        Interactive helper: launches browser directly to YouTube Channel Switcher,
+        allowing the user to switch to their other YouTube channel.
+        Once the user switches or lands in YouTube Studio, automatically detects
+        and saves the newly selected channel.
+        """
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            raise RuntimeError("Playwright is not installed. Run 'pip install playwright && playwright install chromium'")
+
+        old_channel_id = "UCzIwY0Z1oiofBgoXEt1uUxg"
+
+        browser_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-infobars",
+            "--start-maximized",
+        ]
+
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=str(self.user_data_dir),
+                headless=False,
+                args=browser_args,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                viewport=None,
+            )
+            page = context.new_page() if not context.pages else context.pages[0]
+
+            print("\n" + "=" * 75)
+            print(" 🔄 Browser opened to YouTube Channel Switcher!")
+            print("    👉 In the opened browser window:")
+            print("       1. Select your desired YouTube channel (or avatar top-right -> Switch/Add account)")
+            print("       2. Click the green '✅ Use This Channel & Continue' button at the top")
+            print(f"    Previous channel: copprant ({old_channel_id})")
+            print("=" * 75 + "\n")
+
+            try:
+                page.goto("https://www.youtube.com/channel_switcher", wait_until="load", timeout=60000)
+            except Exception:
+                pass
+
+            def inject_banner():
+                try:
+                    page.evaluate("""
+                        () => {
+                            if (document.getElementById('clipwa-switch-banner')) return;
+                            const b = document.createElement('div');
+                            b.id = 'clipwa-switch-banner';
+                            b.innerHTML = `
+                                <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 24px;background:#0d47a1;color:#ffffff;font-family:Segoe UI,Roboto,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,0.5);position:fixed;top:0;left:0;right:0;z-index:2147483647;">
+                                    <div>
+                                        <span style="font-size:16px;font-weight:700;">🎬 CLIPWA:</span>
+                                        <span style="font-size:14px;margin-left:12px;color:#e3f2fd;">Select your channel below, or click avatar (top-right) &rarr; 'Switch account' / 'Add account'.</span>
+                                    </div>
+                                    <button id="clipwa-confirm-btn" style="background:#00e676;color:#000;border:none;border-radius:6px;padding:8px 20px;font-size:14px;font-weight:bold;cursor:pointer;box-shadow:0 2px 5px rgba(0,0,0,0.3);">
+                                        ✅ Use This Channel & Continue &rarr;
+                                    </button>
+                                </div>
+                            `;
+                            document.body.prepend(b);
+                            window.__clipwa_confirmed = false;
+                            const btn = document.getElementById('clipwa-confirm-btn');
+                            if (btn) {
+                                btn.addEventListener('click', () => {
+                                    window.__clipwa_confirmed = true;
+                                    btn.innerText = '⏳ Saving Channel...';
+                                    btn.style.background = '#ffd600';
+                                });
+                            }
+                        }
+                    """)
+                except Exception:
+                    pass
+
+            inject_banner()
+
+            start_t = time.time()
+            switched = False
+            new_channel_id = None
+            new_channel_name = None
+            last_checked_url = None
+
+            while time.time() - start_t < timeout_sec:
+                inject_banner()
+                cur_url = page.url
+
+                # Check if user clicked the green "Use This Channel & Continue" button
+                is_confirmed = False
+                try:
+                    is_confirmed = page.evaluate("() => Boolean(window.__clipwa_confirmed)")
+                except Exception:
+                    pass
+
+                if is_confirmed:
+                    print("\n[YouTubeUploader] 'Use This Channel & Continue' clicked! Inspecting active channel...")
+                    page.wait_for_timeout(2000)
+                    if "studio.youtube.com" not in cur_url:
+                        try:
+                            page.goto("https://studio.youtube.com", wait_until="load", timeout=30000)
+                            page.wait_for_timeout(4000)
+                        except Exception:
+                            pass
+                    cid, cname = self._extract_channel_info(page)
+                    new_channel_id = cid or old_channel_id
+                    new_channel_name = cname or "Active Channel"
+                    switched = True
+                    break
+
+                # Case A: User navigated to studio.youtube.com
+                if "studio.youtube.com" in cur_url:
+                    cid, cname = self._extract_channel_info(page)
+                    if cid and cid != old_channel_id:
+                        new_channel_id = cid
+                        new_channel_name = cname
+                        switched = True
+                        break
+
+                # Case B: User clicked a channel on channel_switcher and redirected to youtube.com homepage or @handle
+                elif cur_url != last_checked_url and (
+                    "youtube.com/@" in cur_url
+                    or ("youtube.com" in cur_url and "channel_switcher" not in cur_url and "account" not in cur_url and "signin" not in cur_url)
+                ):
+                    last_checked_url = cur_url
+                    print(f"[YouTubeUploader] Detected channel navigation to {cur_url}. Verifying in Studio...")
+                    page.wait_for_timeout(3000)
+                    try:
+                        page.goto("https://studio.youtube.com", wait_until="load", timeout=30000)
+                        page.wait_for_timeout(4000)
+                        cid, cname = self._extract_channel_info(page)
+                        if cid and cid != old_channel_id:
+                            new_channel_id = cid
+                            new_channel_name = cname
+                            switched = True
+                            break
+                    except Exception as e:
+                        print(f"[YouTubeUploader] Studio verification note: {e}")
+
+                page.wait_for_timeout(2000)
+
+            # Final check in Studio if not yet switched
+            if not switched:
+                print("[YouTubeUploader] Navigating to Studio to check active channel...")
+                try:
+                    page.goto("https://studio.youtube.com", wait_until="load", timeout=45000)
+                    page.wait_for_timeout(5000)
+                    cid, cname = self._extract_channel_info(page)
+                    if cid:
+                        new_channel_id = cid
+                    if cname:
+                        new_channel_name = cname
+                    if new_channel_id and new_channel_id != old_channel_id:
+                        switched = True
+                except Exception as e:
+                    print(f"[YouTubeUploader] Studio check note: {e}")
+
+            active_id = new_channel_id or old_channel_id
+            active_name = new_channel_name or ("copprant" if active_id == old_channel_id else "Selected Channel")
+
+            print(f"\n=======================================================")
+            print(f" ✅ Active YouTube Channel: {active_name}")
+            print(f"    Channel ID:   {active_id}")
+            print(f"=======================================================\n")
+
+            page.wait_for_timeout(3000)
+            context.close()
+            return {
+                "status": "success",
+                "channel_id": active_id,
+                "channel_name": active_name,
+                "is_different": (active_id != old_channel_id),
+            }
 
     def _get_upload_status(self, page) -> Tuple[str, Optional[int]]:
         """
@@ -232,6 +463,12 @@ class YouTubeShortsUploader:
         if progress_callback:
             progress_callback({"stage": "upload", "message": "Video transfer started, entering metadata..."})
 
+        # Wait for loading scrim to disappear if present
+        try:
+            page.locator(".dialog-scrim").wait_for(state="hidden", timeout=10000)
+        except Exception:
+            pass
+
         title_box = page.locator("#title-textarea #textbox, #textbox[aria-label*='title' i]").first
         title_box.wait_for(state="visible", timeout=60000)
         page.wait_for_timeout(1000)
@@ -253,7 +490,7 @@ class YouTubeShortsUploader:
 
         # Fill Title
         try:
-            title_box.click()
+            title_box.click(force=True)
             page.keyboard.press("Control+A")
             page.keyboard.press("Backspace")
             title_box.fill(title)
@@ -264,7 +501,7 @@ class YouTubeShortsUploader:
         try:
             desc_box = page.locator("#description-textarea #textbox, #textbox[aria-label*='description' i]").first
             if desc_box.is_visible():
-                desc_box.click()
+                desc_box.click(force=True)
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
                 full_desc = f"{description}\n\n" + " ".join(f"#{t.strip('#')}" for t in (tags or []))
@@ -278,28 +515,46 @@ class YouTubeShortsUploader:
                 '[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"], tp-yt-paper-radio-button:has-text("not made for kids")'
             ).first
             not_for_kids.scroll_into_view_if_needed(timeout=10000)
-            not_for_kids.click()
+            not_for_kids.click(force=True)
             print("[YouTubeUploader] Selected audience: 'No, it is not made for kids'")
             page.wait_for_timeout(1000)
         except Exception as e:
             print(f"[YouTubeUploader] Notice setting audience: {e}")
 
-        # 5. Click Next through Steps (Details -> Video Elements -> Checks -> Visibility)
-        for step_idx in range(3):
-            page.wait_for_timeout(1000)
+        # 5. Advance wizard through steps until Visibility step is reached
+        for step_attempt in range(5):
+            vis_check = page.locator('[name="PUBLIC"], tp-yt-paper-radio-button:has-text("Public"), #done-button:not([hidden])').first
+            if vis_check.is_visible():
+                print(f"[YouTubeUploader] Visibility step reached.")
+                break
+
+            # Handle scrim or 'Verify it's you' if present
             try:
-                next_btn = page.locator("#next-button, ytcp-button#next-button").first
-                next_btn.wait_for(state="visible", timeout=15000)
-                # Wait until Next button is not disabled
+                verify_box = page.locator("ytcp-dialog:has-text('Verify it\'s you'), :has-text('To continue, we need to confirm it\'s really you')").first
+                if verify_box.is_visible():
+                    print("\n[YouTubeUploader] ⚠️ Google verification prompt detected on screen! Please complete it in the browser...")
+                    for _ in range(30):
+                        if not verify_box.is_visible():
+                            break
+                        page.wait_for_timeout(2000)
+            except Exception:
+                pass
+
+            try:
+                page.locator(".dialog-scrim").wait_for(state="hidden", timeout=3000)
+            except Exception:
+                pass
+
+            next_btn = page.locator("#next-button, ytcp-button#next-button").first
+            if next_btn.is_visible():
                 for _ in range(20):
                     is_disabled = next_btn.get_attribute("disabled") or (next_btn.get_attribute("aria-disabled") == "true")
                     if not is_disabled:
                         break
                     page.wait_for_timeout(500)
-                next_btn.click()
-                print(f"[YouTubeUploader] Advanced wizard step {step_idx + 1}/3")
-            except Exception as e:
-                print(f"[YouTubeUploader] Notice on Next step {step_idx + 1}: {e}")
+                next_btn.click(force=True)
+                print(f"[YouTubeUploader] Advanced wizard step {step_attempt + 1}")
+            page.wait_for_timeout(1000)
 
         page.wait_for_timeout(1500)
 
@@ -315,7 +570,7 @@ class YouTubeShortsUploader:
 
             vis_radio.wait_for(state="visible", timeout=15000)
             vis_radio.scroll_into_view_if_needed()
-            vis_radio.click()
+            vis_radio.click(force=True)
             print(f"[YouTubeUploader] Set visibility to: {priv_upper}")
         except Exception as e:
             print(f"[YouTubeUploader] Notice setting visibility: {e}")
@@ -374,16 +629,27 @@ class YouTubeShortsUploader:
         done_btn = page.locator(
             "#done-button, ytcp-button#done-button, button:has-text('Save'), button:has-text('Publish')"
         ).first
-        done_btn.wait_for(state="visible", timeout=30000)
+
+        # If done button is not visible or hidden, check if we need to advance to Visibility step
+        if not done_btn.is_visible():
+            for _ in range(3):
+                nxt = page.locator("#next-button, ytcp-button#next-button").first
+                if nxt.is_visible():
+                    nxt.click(force=True)
+                    page.wait_for_timeout(1000)
+                if done_btn.is_visible():
+                    break
+
+        done_btn.wait_for(state="attached", timeout=30000)
 
         # Wait until Done button is enabled
-        for _ in range(30):
+        for _ in range(35):
             is_disabled = done_btn.get_attribute("disabled") or (done_btn.get_attribute("aria-disabled") == "true")
-            if not is_disabled:
+            if not is_disabled and done_btn.is_visible():
                 break
             page.wait_for_timeout(1000)
 
-        done_btn.click()
+        done_btn.click(force=True)
         print(f"[YouTubeUploader] Clicked Publish/Save for '{title}'.")
 
         # 9. Wait for Share Dialog / Confirmation Modal
@@ -525,6 +791,10 @@ class YouTubeShortsUploader:
                     page.wait_for_timeout(2000)
 
             page.wait_for_timeout(2000)
+            cid, cname = self._extract_channel_info(page)
+            print(f"\n=======================================================")
+            print(f" 📺 Uploading to Active Channel: {cname or 'Active Channel'} ({cid or 'active'})")
+            print(f"=======================================================\n")
 
             # 2. Upload each clip sequentially inside the SAME session
             total_clips = len(clips)
