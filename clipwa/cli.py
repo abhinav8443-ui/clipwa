@@ -73,12 +73,17 @@ def cli():
 @click.option("--words-per-line", default=3, type=int, help="Words per subtitle card (1-5).")
 @click.option("--provider", default="gemini", help="LLM Provider: gemini, groq, ollama, heuristic.")
 @click.option("--whisper-model", default="tiny", help="Whisper model: tiny, base, small, medium.")
-@click.option("--upload", is_flag=True, default=False, help="Upload generated shorts to YouTube.")
+@click.option(
+    "--upload/--no-upload",
+    default=True,
+    help="Upload generated shorts to YouTube (default: True).",
+)
 @click.option(
     "--privacy",
+    "-p",
     type=click.Choice(["public", "unlisted", "private"], case_sensitive=False),
-    default="private",
-    help="YouTube Shorts privacy status.",
+    default="public",
+    help="YouTube Shorts privacy status (default: public).",
 )
 @click.option("--dry-run-upload", is_flag=True, default=False, help="Test YouTube upload flow without publishing.")
 def process(
@@ -295,7 +300,13 @@ def cut(video_file, start, end, layout, subtitles, output):
 @click.argument("video_file")
 @click.option("--title", "-t", required=True, help="YouTube Shorts Title.")
 @click.option("--description", "-d", default="Check out this viral moment! #Shorts", help="Description.")
-@click.option("--privacy", type=click.Choice(["public", "unlisted", "private"]), default="private")
+@click.option(
+    "--privacy",
+    "-p",
+    type=click.Choice(["public", "unlisted", "private"], case_sensitive=False),
+    default="public",
+    help="YouTube Shorts privacy status (default: public).",
+)
 @click.option("--dry-run", is_flag=True, default=False, help="Simulate upload without publishing.")
 def upload(video_file, title, description, privacy, dry_run):
     """Upload a video directly to YouTube Shorts."""
@@ -359,7 +370,13 @@ def switch_channel_cmd(timeout):
 
 
 @cli.command(name="upload-existing")
-@click.option("--privacy", type=click.Choice(["public", "unlisted", "private"]), default="public", help="YouTube visibility status.")
+@click.option(
+    "--privacy",
+    "-p",
+    type=click.Choice(["public", "unlisted", "private"], case_sensitive=False),
+    default="public",
+    help="YouTube visibility status (default: public).",
+)
 @click.option("--summary", default=None, help="Path to pipeline_summary.json (defaults to output directory).")
 @click.option("--dry-run", is_flag=True, default=False, help="Simulate upload without publishing.")
 @click.option("--no-title-upgrade", is_flag=True, default=False, help="Skip AI Brain title upgrading.")

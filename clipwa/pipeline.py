@@ -5,6 +5,7 @@ targeted partial clip downloads, exact word alignment, 9:16 reframing, and YouTu
 
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -81,6 +82,19 @@ class ClipwaPipeline:
                 progress_callback(data)
 
         is_local = os.path.exists(url_or_path)
+
+        # Clear out any leftover files inside temp directory so old temporary files never build up
+        if self.temp_dir.exists():
+            for tf in self.temp_dir.iterdir():
+                if tf.name == ".gitkeep":
+                    continue
+                try:
+                    if tf.is_file() or tf.is_symlink():
+                        tf.unlink(missing_ok=True)
+                    elif tf.is_dir():
+                        shutil.rmtree(tf, ignore_errors=True)
+                except Exception:
+                    pass
 
         # ---------------------------------------------------------
         # STAGE 1: FAST DISCOVERY & TRANSCRIPTION
@@ -290,7 +304,7 @@ class ClipwaPipeline:
     def cleanup_uploaded_clip(self, clip_record: Dict[str, Any]) -> bool:
         """
         Deletes local .mp4 and associated temporary artifacts for a clip that was successfully uploaded.
-        Updates the clip record status to 'Uploaded & Local File Cleaned'.
+        Updates the clip record status to 'Uploaded & Deleted Locally'.
         """
         upload_res = clip_record.get("upload_result") or {}
         if upload_res.get("status") != "uploaded" or not upload_res.get("video_url"):
@@ -322,8 +336,9 @@ class ClipwaPipeline:
             patterns = [
                 f"{stem}.*",
                 f"clip_{clip_id}_*.*",
-                f"raw_section_*_{clip_id}.mp4",
-                f"clip_audio_{clip_id}.wav",
+                f"raw_section_{clip_id}.*",
+                f"raw_section_*_{clip_id}.*",
+                f"clip_audio_{clip_id}.*",
             ]
             for pat in patterns:
                 for tf in self.temp_dir.glob(pat):
@@ -333,9 +348,33 @@ class ClipwaPipeline:
                         pass
 
         # 3. Update record status
-        clip_record["status"] = "Uploaded & Local File Cleaned"
-        clip_record["local_file_deleted"] = True
+        clip_record["youtube_status"] = "Uploaded & Deleted Locally"
+        clip_record["file_deleted"] = True
+        clip_record["status"] = "Uploaded & Deleted Locally"
+        upload_res["file_deleted"] = True
         upload_res["local_file_cleaned"] = True
+
+        # Sync with pipeline_summary.json
+        summary_path = self.output_dir / "pipeline_summary.json"
+        if summary_path.exists():
+            try:
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                clips = data.get("clips", [])
+                for c in clips:
+                    if (c.get("clip_id") == clip_record.get("clip_id")) or (
+                        c.get("file_name") and c.get("file_name") == clip_record.get("file_name")
+                    ):
+                        c["youtube_status"] = "Uploaded & Deleted Locally"
+                        c["file_deleted"] = True
+                        c["status"] = "Uploaded & Deleted Locally"
+                        c["upload_result"] = upload_res
+                        break
+                with open(summary_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+
         return deleted
 
     def upload_existing_clips(
@@ -349,108 +388,89 @@ class ClipwaPipeline:
     ) -> List[Dict[str, Any]]:
         """
         Uploads clips that were already generated in the output directory.
-        Upgrades their titles using AI Brain if requested.
+        Strictly reads pipeline_summary.json and only uploads the latest batch of clips
+        whose youtube_status is 'Skipped', 'Queued', or 'Error' and whose .mp4 file still exists.
+        Never globs arbitrary files!
         """
         def notify(stage: str, message: str, extra: Optional[Dict[str, Any]] = None, **kwargs) -> None:
             if progress_callback:
                 progress_callback(stage, message, extra or kwargs)
 
         path = Path(summary_path) if summary_path else (self.output_dir / "pipeline_summary.json")
-        data = {}
-        clips = []
+        if not path.exists():
+            raise FileNotFoundError(f"Summary file not found at '{path}'. Run 'clipwa process <URL>' first.")
 
-        if path.exists():
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                clips = data.get("clips", [])
-            except Exception:
-                pass
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
 
-        # Auto-discover clips if summary has no real video clips
-        has_real_clips = any("4391" in c.get("file_name", "") or "6084" in c.get("file_name", "") or "2509" in c.get("file_name", "") for c in clips)
-        if not clips or not has_real_clips:
-            found_mp4s = sorted(list(self.output_dir.glob("*_short.mp4")))
-            real_mp4s = [p for p in found_mp4s if "0_35" not in p.name and "synthetic" not in p.name]
-            target_mp4s = real_mp4s if real_mp4s else found_mp4s
-            if target_mp4s:
-                clips = []
-                for idx, p in enumerate(target_mp4s, 1):
-                    raw_title = p.stem.replace("_short", "").replace("_", " ").title()
-                    viral_title = self.ai_brain.generate_viral_title(raw_title)
-                    clips.append({
-                        "clip_id": idx,
-                        "file_path": str(p),
-                        "file_name": p.name,
-                        "duration": 50.0,
-                        "virality_score": 95,
-                        "youtube_title": viral_title,
-                        "youtube_description": f"{raw_title}\n\n#Shorts #Viral #Trending",
-                        "tags": ["shorts", "viral", "trending"],
-                        "upload_result": None,
-                    })
-                data["clips"] = clips
-
+        clips = data.get("clips", [])
         if not clips:
-            raise ValueError(f"No video clips found in output directory '{self.output_dir}'.")
+            raise ValueError(f"No clips found in summary file '{path}'.")
 
-        if upgrade_titles:
-            notify("upgrade_titles", "Upgrading clip titles to high-CTR viral hooks using AI Brain...")
-            for clip in clips:
-                # Keep existing upgraded titles if already set and uploaded
-                if (clip.get("upload_result") or {}).get("status") == "uploaded" and not force:
-                    continue
-                raw_text = clip.get("youtube_description", "") or clip.get("hook_text", "")
-                clip["youtube_title"] = self.ai_brain.generate_viral_title(raw_text)
-
-        notify("start_upload", f"Uploading existing Shorts to YouTube ({privacy_status})...")
-
-        # Validate file paths
-        valid_clips = []
-        for idx, clip in enumerate(clips, 1):
-            file_path = clip.get("file_path", "")
-            if not os.path.exists(file_path):
-                alt_path = str(self.output_dir / clip.get("file_name", ""))
-                if os.path.exists(alt_path):
-                    clip["file_path"] = alt_path
-                    valid_clips.append(clip)
-                else:
-                    notify("skip_clip", f"Clip file not found: {file_path}")
-                    clip["upload_result"] = {"error": f"File not found: {file_path}"}
-            else:
-                valid_clips.append(clip)
-
-        # Filter out already uploaded clips unless force=True
+        # Strictly filter for clips whose youtube_status is "Skipped", "Queued", or "Error" (or pending),
+        # not already uploaded/deleted, and whose .mp4 file still exists on disk.
         clips_to_upload = []
-        for c in valid_clips:
-            res = c.get("upload_result") or {}
-            if not force and res.get("status") == "uploaded":
-                notify("skip_clip", f"Clip already published: {c.get('youtube_title')} ({res.get('video_url')})")
-            else:
+        for c in clips:
+            yt_status = c.get("youtube_status") or c.get("status") or "Skipped"
+            is_deleted = c.get("file_deleted", False)
+            upload_res = c.get("upload_result") or {}
+            is_uploaded = upload_res.get("status") == "uploaded" and bool(upload_res.get("video_url"))
+
+            # Skip if already uploaded and deleted
+            if not force and (is_deleted or is_uploaded or yt_status in ("Uploaded & Deleted Locally", "Uploaded & Local File Cleaned")):
+                notify("skip_clip", f"Clip already uploaded: {c.get('youtube_title')} ({upload_res.get('video_url', 'Done')})")
+                continue
+
+            # Verify that the .mp4 file actually exists on disk
+            f_path = c.get("file_path") or str(self.output_dir / c.get("file_name", ""))
+            if not os.path.exists(f_path):
+                alt_path = str(self.output_dir / c.get("file_name", ""))
+                if os.path.exists(alt_path):
+                    c["file_path"] = alt_path
+                    f_path = alt_path
+                else:
+                    notify("skip_clip", f"Clip file not found on disk, skipping: {f_path}")
+                    continue
+
+            # Only upload clips with eligible status
+            if force or yt_status in ("Skipped", "Queued", "Error") or upload_res.get("status") in ("failed", "queued_daily_limit", None):
                 clips_to_upload.append(c)
 
-        if clips_to_upload:
-            def upload_cb(d: Dict[str, Any]) -> None:
-                stg = d.get("stage", "upload_progress")
-                msg = d.get("message", "Uploading...")
-                notify(stg, msg, d)
+        if not clips_to_upload:
+            notify("finished", "No pending clips to upload in pipeline_summary.json!")
+            return clips
 
-            self.uploader.upload_multiple(
-                clips=clips_to_upload,
-                privacy_status=privacy_status,
-                dry_run=dry_run,
-                progress_callback=upload_cb,
-            )
+        notify("start_upload", f"Found {len(clips_to_upload)} pending Short(s) from current summary to upload ({privacy_status.upper()})...")
 
-            # Auto-cleanup files for any newly uploaded clips
-            for c in clips_to_upload:
-                self.cleanup_uploaded_clip(c)
-        else:
-            notify("finished", "All clips are already uploaded to YouTube!")
+        if upgrade_titles:
+            for clip in clips_to_upload:
+                if (clip.get("upload_result") or {}).get("status") == "uploaded" and not force:
+                    continue
+                # If title is already a strong hook, keep it; otherwise upgrade
+                cur_title = clip.get("youtube_title", "")
+                if not cur_title or len(cur_title) < 10:
+                    raw_text = clip.get("youtube_description", "") or clip.get("hook_text", "")
+                    clip["youtube_title"] = self.ai_brain.generate_viral_title(raw_text)
+
+        def upload_cb(d: Dict[str, Any]) -> None:
+            stg = d.get("stage", "upload_progress")
+            msg = d.get("message", "Uploading...")
+            notify(stg, msg, d)
+
+        self.uploader.upload_multiple(
+            clips=clips_to_upload,
+            privacy_status=privacy_status,
+            dry_run=dry_run,
+            progress_callback=upload_cb,
+        )
+
+        # Enforce cleanup for any newly uploaded clips
+        for c in clips_to_upload:
+            self.cleanup_uploaded_clip(c)
 
         # Update summary file
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-        notify("finished", f"Finished uploading {len(clips)} Shorts!")
+        notify("finished", f"Finished uploading {len(clips_to_upload)} Shorts!")
         return clips

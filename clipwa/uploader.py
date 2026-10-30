@@ -37,12 +37,42 @@ class YouTubeShortsUploader:
         client_secrets_file: Optional[str] = None,
         token_file: Optional[str] = None,
         user_data_dir: Optional[Path] = None,
+        output_dir: Optional[Path] = None,
+        temp_dir: Optional[Path] = None,
     ):
         self.client_secrets_file = client_secrets_file or Config.YOUTUBE_CLIENT_SECRETS_FILE
         self.token_file = token_file or Config.YOUTUBE_TOKEN_FILE
         self.user_data_dir = user_data_dir or (Config.BASE_DIR / "youtube_auth_profile")
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir = output_dir or Config.OUTPUT_DIR
+        self.temp_dir = temp_dir or Config.TEMP_DIR
         self._youtube_client = None
+
+    def _sync_summary_clip(self, clip_record: Dict[str, Any]) -> None:
+        """
+        Updates pipeline_summary.json on disk with the latest clip upload status.
+        """
+        summary_path = self.output_dir / "pipeline_summary.json"
+        if not summary_path.exists():
+            return
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            clips = data.get("clips", [])
+            for c in clips:
+                if (c.get("clip_id") == clip_record.get("clip_id")) or (
+                    c.get("file_name") and c.get("file_name") == clip_record.get("file_name")
+                ):
+                    c["youtube_status"] = clip_record.get("youtube_status", "Uploaded & Deleted Locally")
+                    c["file_deleted"] = clip_record.get("file_deleted", True)
+                    c["status"] = clip_record.get("status", "Uploaded & Deleted Locally")
+                    if "upload_result" in clip_record:
+                        c["upload_result"] = clip_record["upload_result"]
+                    break
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"[YouTubeUploader] Warning updating pipeline_summary.json: {e}")
 
     def _unlock_profile(self) -> None:
         """
@@ -1034,17 +1064,47 @@ class YouTubeShortsUploader:
                     clip["upload_result"] = res
                     print(f"✅ Clip [{idx}/{total_clips}] uploaded successfully: {res.get('video_url')}")
 
-                    # Automatic local file cleanup upon confirmed successful upload
+                    # Automatic immediate file cleanup upon confirmed successful upload
                     if res.get("status") == "uploaded" and res.get("video_url"):
+                        file_name = clip.get("file_name") or (os.path.basename(file_path) if file_path else "")
+                        # 1. Immediately delete rendered .mp4 file
                         if file_path and os.path.exists(file_path):
                             try:
                                 os.remove(file_path)
                                 print(f"[YouTubeUploader] 🗑️ Cleaned up local file: {os.path.basename(file_path)}")
-                                clip["status"] = "Uploaded & Local File Cleaned"
-                                clip["local_file_deleted"] = True
-                                res["local_file_cleaned"] = True
                             except Exception as ex:
                                 print(f"[YouTubeUploader] Warning deleting local file {file_path}: {ex}")
+
+                        if file_name and (self.output_dir / file_name).exists():
+                            try:
+                                (self.output_dir / file_name).unlink(missing_ok=True)
+                            except Exception:
+                                pass
+
+                        # 2. Also delete any matching raw section video, extracted .wav audio, and .ass subtitle files for that clip inside temp / workspace
+                        if self.temp_dir and self.temp_dir.exists():
+                            stem = Path(file_name).stem if file_name else ""
+                            clip_id = clip.get("clip_id", idx)
+                            patterns = [
+                                f"{stem}.*",
+                                f"clip_{clip_id}_*.*",
+                                f"raw_section_{clip_id}.*",
+                                f"raw_section_*_{clip_id}.*",
+                                f"clip_audio_{clip_id}.*",
+                            ]
+                            for pat in patterns:
+                                for tf in self.temp_dir.glob(pat):
+                                    try:
+                                        tf.unlink(missing_ok=True)
+                                    except Exception:
+                                        pass
+
+                        # 3. Update clip metadata
+                        clip["youtube_status"] = "Uploaded & Deleted Locally"
+                        clip["file_deleted"] = True
+                        clip["status"] = "Uploaded & Deleted Locally"
+                        res["file_deleted"] = True
+                        self._sync_summary_clip(clip)
                 except DailyUploadLimitError as limit_err:
                     print(f"\n[YouTubeUploader] ⚠️ {limit_err}")
                     print("[YouTubeUploader] 🛑 Stopping further uploads for this session.")
@@ -1053,7 +1113,10 @@ class YouTubeShortsUploader:
                         "status": "queued_daily_limit",
                         "error": str(limit_err),
                     }
+                    clip["youtube_status"] = "Queued"
+                    clip["file_deleted"] = False
                     clip["status"] = "Queued (Daily Limit Reached - Saved in output/)"
+                    self._sync_summary_clip(clip)
                     # Mark all subsequent clips as queued without deletion
                     for rem_idx in range(idx, total_clips):
                         rem_clip = clips[rem_idx]
@@ -1061,11 +1124,17 @@ class YouTubeShortsUploader:
                             "status": "queued_daily_limit",
                             "error": "Daily upload limit reached - saved in output/",
                         }
+                        rem_clip["youtube_status"] = "Queued"
+                        rem_clip["file_deleted"] = False
                         rem_clip["status"] = "Queued (Daily Limit Reached - Saved in output/)"
+                        self._sync_summary_clip(rem_clip)
                     break
                 except Exception as e:
                     print(f"❌ Clip [{idx}/{total_clips}] upload failed: {e}")
                     clip["upload_result"] = {"error": str(e), "status": "failed"}
+                    clip["youtube_status"] = "Error"
+                    clip["file_deleted"] = False
+                    self._sync_summary_clip(clip)
                     # Try to reset UI state for next clip
                     try:
                         page.keyboard.press("Escape")
