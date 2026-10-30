@@ -14,12 +14,18 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config
+from .scheduler import PeakSlotResolver, ScheduleLedger
+
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
 
 try:
     if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)
+        sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
     if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
 except Exception:
     pass
 
@@ -63,9 +69,17 @@ class YouTubeShortsUploader:
                 if (c.get("clip_id") == clip_record.get("clip_id")) or (
                     c.get("file_name") and c.get("file_name") == clip_record.get("file_name")
                 ):
-                    c["youtube_status"] = clip_record.get("youtube_status", "Uploaded & Deleted Locally")
+                    c["youtube_status"] = clip_record.get("youtube_status", "Scheduled & Deleted Locally")
                     c["file_deleted"] = clip_record.get("file_deleted", True)
-                    c["status"] = clip_record.get("status", "Uploaded & Deleted Locally")
+                    c["status"] = clip_record.get("status", c["youtube_status"])
+                    if "scheduled_slot" in clip_record:
+                        c["scheduled_slot"] = clip_record["scheduled_slot"]
+                    if "scheduled_date" in clip_record:
+                        c["scheduled_date"] = clip_record["scheduled_date"]
+                    if "scheduled_time" in clip_record:
+                        c["scheduled_time"] = clip_record["scheduled_time"]
+                    if "display_plan" in clip_record:
+                        c["display_plan"] = clip_record["display_plan"]
                     if "upload_result" in clip_record:
                         c["upload_result"] = clip_record["upload_result"]
                     break
@@ -73,6 +87,90 @@ class YouTubeShortsUploader:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"[YouTubeUploader] Warning updating pipeline_summary.json: {e}")
+
+    def _display_schedule_plan_table(self, clips: List[Dict[str, Any]], title_prefix: str = "Upcoming") -> None:
+        """Displays a clean Rich table of the scheduled peak windows for each clip."""
+        try:
+            table = Table(
+                title=f"[bold]{title_prefix} Peak Engagement Schedule Plan[/bold]",
+                show_header=True,
+                header_style="bold magenta",
+                border_style="cyan",
+            )
+            table.add_column("#", justify="center", width=4)
+            table.add_column("Viral Short Title", style="bold white", width=38)
+            table.add_column("Peak Window", style="yellow", width=24)
+            table.add_column("Target Date & Time", style="cyan", width=26)
+            table.add_column("Status / Link", style="green", width=34)
+
+            for idx, c in enumerate(clips, 1):
+                slot = c.get("scheduled_slot") or {}
+                slot_name = slot.get("slot_name") or "Peak Window"
+                date_time = (
+                    f"{slot.get('scheduled_date', '')} @ {slot.get('scheduled_time', '')}"
+                    if slot.get("scheduled_date")
+                    else "Immediate Publish"
+                )
+                res = c.get("upload_result") or {}
+                yt_status = c.get("youtube_status") or c.get("status") or ""
+
+                if res.get("status") in ("scheduled", "uploaded") or "Scheduled" in yt_status:
+                    status_disp = "[green]Scheduled | Deleted Locally[/green]"
+                elif yt_status == "Queued for Next Upload Window (Saved in output/)":
+                    status_disp = "[yellow]Queued for Next Window[/yellow]"
+                elif res.get("status") == "failed" or yt_status == "Error":
+                    status_disp = f"[red]Failed ({res.get('error', 'Error')})[/red]"
+                else:
+                    status_disp = f"[dim]{yt_status or 'Planned'}[/dim]"
+
+                table.add_row(
+                    str(c.get("clip_id", idx)),
+                    (c.get("youtube_title") or f"Short #{idx}")[:38],
+                    slot_name,
+                    date_time,
+                    status_disp,
+                )
+
+            console.print("\n")
+            console.print(table)
+            console.print("\n")
+        except Exception as e:
+            print(f"[YouTubeUploader] Schedule table display notice: {e}")
+
+    def _scrape_scheduled_studio_shorts(self, page) -> List[Dict[str, Any]]:
+        """
+        Inspects YouTube Studio Content -> Shorts to discover any currently scheduled Shorts.
+        Safe and non-blocking with tight timeouts.
+        """
+        scraped = []
+        try:
+            print("[YouTubeUploader] Checking live YouTube Studio calendar for scheduled Shorts...")
+            page.goto("https://studio.youtube.com/videos/short", wait_until="domcontentloaded", timeout=12000)
+            page.wait_for_timeout(2000)
+            rows = page.locator("ytcp-video-row")
+            row_count = min(rows.count(), 20)
+            for i in range(row_count):
+                row = rows.nth(i)
+                text = row.inner_text()
+                if "Scheduled" in text or "scheduled" in text:
+                    d_m = re.search(r"([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})", text)
+                    t_m = re.search(r"(\d{1,2}:\d{2}\s+(?:AM|PM|am|pm))", text)
+                    title_elem = row.locator("#video-title").first
+                    t_text = title_elem.inner_text().strip() if title_elem.count() > 0 else f"Scheduled #{i+1}"
+                    if d_m:
+                        scraped.append({
+                            "title": t_text,
+                            "scheduled_date": d_m.group(1),
+                            "scheduled_time": t_m.group(1).upper() if t_m else "8:00 AM",
+                            "source": "studio_scrape",
+                        })
+            if scraped:
+                print(f"[YouTubeUploader] Found {len(scraped)} currently scheduled Short(s) in YouTube Studio calendar.")
+            page.goto("https://studio.youtube.com", wait_until="load", timeout=25000)
+            page.wait_for_timeout(2000)
+        except Exception:
+            pass
+        return scraped
 
     def _unlock_profile(self) -> None:
         """
@@ -469,6 +567,7 @@ class YouTubeShortsUploader:
         description: str,
         tags: Optional[List[str]] = None,
         privacy_status: str = "public",
+        scheduled_slot: Optional[Dict[str, Any]] = None,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """
@@ -687,41 +786,146 @@ class YouTubeShortsUploader:
 
         page.wait_for_timeout(1500)
 
-        # 6. Set Visibility (Public, Unlisted, or Private)
+        # 6. Set Visibility or Schedule Peak Engagement Window
         priv_upper = privacy_status.upper()
-        try:
-            if priv_upper == "PUBLIC":
-                vis_sel = '[name="PUBLIC"], tp-yt-paper-radio-button:has-text("Public")'
-            elif priv_upper == "UNLISTED":
-                vis_sel = '[name="UNLISTED"], tp-yt-paper-radio-button:has-text("Unlisted")'
-            else:
-                vis_sel = '[name="PRIVATE"], tp-yt-paper-radio-button:has-text("Private")'
+        if scheduled_slot:
+            target_date = scheduled_slot.get("scheduled_date")
+            target_time = scheduled_slot.get("scheduled_time")
+            slot_name = scheduled_slot.get("slot_name", "Peak Window")
+            print(f"[YouTubeUploader] 📅 Setting Scheduled Mode for peak window: {scheduled_slot.get('display_plan', f'{target_date} @ {target_time}')}...")
 
-            vis_radio = page.locator(vis_sel).first
+            # 1. Expand / Click the Schedule option
             try:
-                vis_radio.wait_for(state="visible", timeout=10000)
-                vis_radio.scroll_into_view_if_needed()
-                vis_radio.click(force=True)
+                for sel in [
+                    '#schedule-radio-button',
+                    'tp-yt-paper-radio-button[name="SCHEDULE"]',
+                    '#second-container-expand-button',
+                    'tp-yt-paper-radio-button:has-text("Schedule")',
+                ]:
+                    sched_opt = page.locator(sel).first
+                    if sched_opt.is_visible():
+                        sched_opt.click(force=True)
+                        break
             except Exception:
                 pass
 
-            # Enforce visibility via JavaScript in Polymer context
-            page.evaluate(f"""
-                () => {{
-                    const targetName = '{priv_upper}';
-                    const r = document.querySelector(`tp-yt-paper-radio-button[name="${{targetName}}"]`) ||
-                              document.querySelector(`[name="${{targetName}}"]`) ||
-                              Array.from(document.querySelectorAll('tp-yt-paper-radio-button')).find(el => el.innerText && el.innerText.toUpperCase().includes(targetName));
-                    if (r) {{
+            page.evaluate("""
+                () => {
+                    const r = document.querySelector('tp-yt-paper-radio-button[name="SCHEDULE"]') || document.querySelector('#schedule-radio-button');
+                    if (r) {
                         r.click();
                         r.setAttribute('checked', 'true');
                         r.setAttribute('aria-checked', 'true');
+                    }
+                    const exp = document.querySelector('#second-container-expand-button');
+                    if (exp) exp.click();
+                }
+            """)
+            page.wait_for_timeout(1500)
+
+            # 2. Set Date in ytcp-visibility-scheduler
+            for d_sel in [
+                "ytcp-visibility-scheduler ytcp-date-picker input",
+                "#datepicker-trigger input",
+                "ytcp-visibility-scheduler #datepicker-trigger",
+                "ytcp-date-picker input",
+                "#datepicker-trigger",
+            ]:
+                try:
+                    d_input = page.locator(d_sel).first
+                    if d_input.is_visible():
+                        d_input.click()
+                        page.wait_for_timeout(400)
+                        page.keyboard.press("Control+A")
+                        page.keyboard.type(target_date)
+                        page.keyboard.press("Enter")
+                        page.wait_for_timeout(400)
+                        page.keyboard.press("Escape")
+                        break
+                except Exception:
+                    pass
+
+            page.evaluate(f"""
+                () => {{
+                    const inp = document.querySelector('ytcp-visibility-scheduler ytcp-date-picker input') ||
+                                document.querySelector('#datepicker-trigger input') ||
+                                document.querySelector('ytcp-date-picker input');
+                    if (inp) {{
+                        inp.value = '{target_date}';
+                        inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
                     }}
                 }}
             """)
-            print(f"[YouTubeUploader] Set visibility to: {priv_upper}")
-        except Exception as e:
-            print(f"[YouTubeUploader] Notice setting visibility: {e}")
+            page.wait_for_timeout(1000)
+
+            # 3. Set Time in ytcp-visibility-scheduler
+            for t_sel in [
+                "ytcp-visibility-scheduler #time-of-day-trigger input",
+                "#time-of-day-trigger input",
+                "ytcp-visibility-scheduler tp-yt-paper-input input",
+                "input[aria-label*='Time' i]",
+            ]:
+                try:
+                    t_input = page.locator(t_sel).first
+                    if t_input.is_visible():
+                        t_input.click()
+                        page.wait_for_timeout(400)
+                        page.keyboard.press("Control+A")
+                        page.keyboard.type(target_time)
+                        page.keyboard.press("Enter")
+                        page.wait_for_timeout(400)
+                        page.keyboard.press("Escape")
+                        break
+                except Exception:
+                    pass
+
+            page.evaluate(f"""
+                () => {{
+                    const inp = document.querySelector('ytcp-visibility-scheduler #time-of-day-trigger input') ||
+                                document.querySelector('#time-of-day-trigger input');
+                    if (inp) {{
+                        inp.value = '{target_time}';
+                        inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }}
+                }}
+            """)
+            page.wait_for_timeout(1000)
+            print(f"[YouTubeUploader] Configured Schedule Slot: {target_date} @ {target_time} ({slot_name})")
+        else:
+            try:
+                if priv_upper == "PUBLIC":
+                    vis_sel = '[name="PUBLIC"], tp-yt-paper-radio-button:has-text("Public")'
+                elif priv_upper == "UNLISTED":
+                    vis_sel = '[name="UNLISTED"], tp-yt-paper-radio-button:has-text("Unlisted")'
+                else:
+                    vis_sel = '[name="PRIVATE"], tp-yt-paper-radio-button:has-text("Private")'
+
+                vis_radio = page.locator(vis_sel).first
+                try:
+                    vis_radio.wait_for(state="visible", timeout=10000)
+                    vis_radio.scroll_into_view_if_needed()
+                    vis_radio.click(force=True)
+                except Exception:
+                    pass
+
+                page.evaluate(f"""
+                    () => {{
+                        const targetName = '{priv_upper}';
+                        const r = document.querySelector(`tp-yt-paper-radio-button[name="${{targetName}}"]`) ||
+                                  document.querySelector(`[name="${{targetName}}"]`) ||
+                                  Array.from(document.querySelectorAll('tp-yt-paper-radio-button')).find(el => el.innerText && el.innerText.toUpperCase().includes(targetName));
+                        if (r) {{
+                            r.click();
+                            r.setAttribute('checked', 'true');
+                            r.setAttribute('aria-checked', 'true');
+                        }}
+                    }}
+                """)
+                print(f"[YouTubeUploader] Set visibility to: {priv_upper}")
+            except Exception as e:
+                print(f"[YouTubeUploader] Notice setting visibility: {e}")
 
         # Extract video URL early if available
         video_url = None
@@ -776,10 +980,11 @@ class YouTubeShortsUploader:
         if not upload_complete:
             raise RuntimeError(f"YouTube upload did not reach 100% completion within timeout. Last status: '{status_text}'")
 
-        # 8. Click Done / Publish button
-        print(f"[YouTubeUploader] 100% upload bytes confirmed. Saving / Publishing Short...")
+        # 8. Click Done / Schedule / Publish button
+        action_verb = "Schedule" if scheduled_slot else "Publish"
+        print(f"[YouTubeUploader] 100% upload bytes confirmed. Saving / {action_verb}ing Short...")
 
-        # Ensure we are fully on the final publish step
+        # Ensure we are fully on the final publish/schedule step
         for _ in range(4):
             nxt = page.locator("#next-button:not([hidden]):visible, ytcp-button#next-button:not([hidden]):visible").first
             if nxt.is_visible():
@@ -791,24 +996,25 @@ class YouTubeShortsUploader:
             else:
                 break
 
-        # Re-verify visibility selection right before publish
-        page.evaluate(f"""
-            () => {{
-                const targetName = '{priv_upper}';
-                const r = document.querySelector(`tp-yt-paper-radio-button[name="${{targetName}}"]`) ||
-                          document.querySelector(`[name="${{targetName}}"]`);
-                if (r) {{
-                    r.click();
-                    r.setAttribute('checked', 'true');
+        # Re-verify visibility selection right before publish (if not scheduled)
+        if not scheduled_slot:
+            page.evaluate(f"""
+                () => {{
+                    const targetName = '{priv_upper}';
+                    const r = document.querySelector(`tp-yt-paper-radio-button[name="${{targetName}}"]`) ||
+                              document.querySelector(`[name="${{targetName}}"]`);
+                    if (r) {{
+                        r.click();
+                        r.setAttribute('checked', 'true');
+                    }}
                 }}
-            }}
-        """)
-        page.wait_for_timeout(1000)
+            """)
+            page.wait_for_timeout(1000)
 
-        # Locate Done / Publish button (specifically not hidden)
+        # Locate Done / Schedule / Publish button (specifically not hidden)
         done_btn = page.locator(
             "#done-button:not([hidden]):visible, ytcp-button#done-button:not([hidden]):visible, "
-            "button:has-text('Publish'):visible, button:has-text('Save'):visible"
+            "button:has-text('Schedule'):visible, button:has-text('Publish'):visible, button:has-text('Save'):visible"
         ).first
 
         # Wait until Done button is enabled
@@ -819,7 +1025,7 @@ class YouTubeShortsUploader:
                     break
             page.wait_for_timeout(1000)
 
-        # Click publish via Playwright and JavaScript fallback
+        # Click schedule/publish via Playwright and JavaScript fallback
         published_clicked = False
         try:
             if done_btn.is_visible():
@@ -833,6 +1039,7 @@ class YouTubeShortsUploader:
                 () => {
                     const btn = document.querySelector('#done-button') || 
                                 document.querySelector('ytcp-button#done-button') ||
+                                document.querySelector('button[aria-label="Schedule"]') ||
                                 document.querySelector('button[aria-label="Publish"]') ||
                                 document.querySelector('button[aria-label="Save"]');
                     if (btn) {
@@ -846,7 +1053,30 @@ class YouTubeShortsUploader:
                 }
             """)
 
-        print(f"[YouTubeUploader] Clicked Publish/Save for '{title}'.")
+        print(f"[YouTubeUploader] Clicked {action_verb} for '{title}'.")
+
+        # Handle 'We're still checking your content' or 'Checks are still running' popup
+        try:
+            page.wait_for_timeout(1500)
+            for _ in range(5):
+                check_box = page.locator(
+                    "ytcp-dialog:has-text('checking your content'), ytcp-dialog:has-text('Checks are still running'), "
+                    "ytcp-dialog:has-text('Schedule anyway'), ytcp-dialog:has-text('Publish anyway')"
+                ).first
+                if check_box.is_visible():
+                    print(f"[YouTubeUploader] ⚠️ Content check dialog appeared. Confirming '{action_verb} anyway'...")
+                    confirm_btn = check_box.locator(
+                        "ytcp-button:has-text('Schedule anyway'), button:has-text('Schedule anyway'), "
+                        "ytcp-button:has-text('Publish anyway'), button:has-text('Publish anyway'), "
+                        "#confirm-button, #secondary-action-button"
+                    ).first
+                    if confirm_btn.is_visible():
+                        confirm_btn.click(force=True)
+                        page.wait_for_timeout(2000)
+                        break
+                page.wait_for_timeout(800)
+        except Exception:
+            pass
 
         # 9. Shielded post-publish URL extraction & buffer wait
         # (Once 100% upload bytes are confirmed and Publish is clicked, the video IS published!)
@@ -928,35 +1158,76 @@ class YouTubeShortsUploader:
             final_short_url = video_url or "https://youtube.com/shorts"
 
         return {
-            "status": "uploaded",
+            "status": "scheduled" if scheduled_slot else "uploaded",
             "engine": "studio_playwright",
             "video_id": vid_id,
             "video_url": final_short_url,
             "title": title,
-            "privacy": privacy_status,
+            "privacy": "SCHEDULE" if scheduled_slot else privacy_status,
+            "scheduled_date": scheduled_slot.get("scheduled_date") if scheduled_slot else None,
+            "scheduled_time": scheduled_slot.get("scheduled_time") if scheduled_slot else None,
+            "scheduled_slot": scheduled_slot.get("slot_name") if scheduled_slot else None,
+            "display_plan": scheduled_slot.get("display_plan") if scheduled_slot else None,
         }
 
     def upload_multiple_via_studio(
         self,
         clips: List[Dict[str, Any]],
         privacy_status: str = "public",
+        scheduled: bool = True,
+        max_per_day: int = 4,
         dry_run: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Uploads multiple clips sequentially within the SAME persistent Playwright browser session.
-        Prevents premature browser closing and zombie 'Uploading 0%' drafts!
+        Enforces 100% Scheduled Peak Engagement Windows, rolling 24-hour rate limit (8 uploads max),
+        and immediate local file deletion.
         """
+        ledger = ScheduleLedger(self.output_dir / "schedule_ledger.json")
+
+        # 1. Check Rolling 24-Hour Safety Cap (Max 8 uploads per 24 hours)
+        recent_uploads = ledger.get_recent_upload_count(hours=24)
+        print(f"\n[YouTubeUploader] 📊 24-Hour Rolling Upload Count: {recent_uploads}/8 permitted uploads.")
+        if recent_uploads >= 8:
+            print("[YouTubeUploader] 🛑 Safety Cap Reached: 8 uploads already completed in the last 24 hours!")
+            print("[YouTubeUploader] 💾 All clips are preserved safely in output/.\n")
+            for c in clips:
+                c["youtube_status"] = "Queued for Next Upload Window (Saved in output/)"
+                c["status"] = "Queued for Next Upload Window (Saved in output/)"
+                c["file_deleted"] = False
+                self._sync_summary_clip(c)
+            self._display_schedule_plan_table(clips, title_prefix="Upload Safety Limit Reached")
+            return clips
+
+        # 2. Compute Peak Slot Schedule Plan
+        resolver = PeakSlotResolver(ledger)
+        if scheduled:
+            slots = resolver.get_next_available_slots(num_clips=len(clips), max_per_day=max_per_day)
+            for i, c in enumerate(clips):
+                if i < len(slots):
+                    c["scheduled_slot"] = slots[i]
+                    c["scheduled_date"] = slots[i]["scheduled_date"]
+                    c["scheduled_time"] = slots[i]["scheduled_time"]
+                    c["display_plan"] = slots[i]["display_plan"]
+
+        self._display_schedule_plan_table(clips, title_prefix="Planned")
+
         if dry_run:
             for idx, c in enumerate(clips, 1):
+                s_slot = c.get("scheduled_slot") or {}
                 c["upload_result"] = {
                     "status": "dry_run_success",
                     "engine": "studio_playwright",
                     "video_id": f"dry_run_studio_{idx}",
                     "video_url": f"https://youtube.com/shorts/dry_run_{idx}",
                     "title": c.get("youtube_title", f"Clip #{idx}"),
-                    "privacy": privacy_status,
+                    "privacy": "SCHEDULE" if scheduled else privacy_status,
+                    "scheduled_date": s_slot.get("scheduled_date"),
+                    "scheduled_time": s_slot.get("scheduled_time"),
+                    "scheduled_slot": s_slot.get("slot_name"),
                 }
+            self._display_schedule_plan_table(clips, title_prefix="Dry-Run Confirmed")
             return clips
 
         try:
@@ -1017,19 +1288,53 @@ class YouTubeShortsUploader:
             page.wait_for_timeout(2000)
             cid, cname = self._extract_channel_info(page)
             print(f"\n=======================================================")
-            print(f" 📺 Uploading to Active Channel: {cname or 'Active Channel'} ({cid or 'active'})")
+            print(f" 📺 Active YouTube Channel: {cname or 'Active Channel'} ({cid or 'active'})")
             print(f"=======================================================\n")
 
-            # 2. Upload each clip sequentially inside the SAME session
+            # Check live Studio scheduled shorts calendar
+            try:
+                scraped = self._scrape_scheduled_studio_shorts(page)
+                if scraped:
+                    ledger.merge_studio_scraped_slots(scraped)
+                    if scheduled:
+                        slots = resolver.get_next_available_slots(num_clips=len(clips), max_per_day=max_per_day)
+                        for i, c in enumerate(clips):
+                            if i < len(slots):
+                                c["scheduled_slot"] = slots[i]
+                                c["scheduled_date"] = slots[i]["scheduled_date"]
+                                c["scheduled_time"] = slots[i]["scheduled_time"]
+                                c["display_plan"] = slots[i]["display_plan"]
+            except Exception:
+                pass
+
+            # 2. Upload and Schedule each clip sequentially inside the SAME session
             total_clips = len(clips)
             for idx, clip in enumerate(clips, 1):
+                # Safety Rate Limiter Check (rolling 24h cap of 8 uploads)
+                if recent_uploads >= 8:
+                    print(f"\n[YouTubeUploader] 🛑 Reached 24-hour upload safety limit (8 uploads).")
+                    print(f"[YouTubeUploader] 💾 Preserving remaining {total_clips - idx + 1} clip(s) safely in output/.\n")
+                    for rem_idx in range(idx - 1, total_clips):
+                        rem_clip = clips[rem_idx]
+                        rem_clip["upload_result"] = {
+                            "status": "queued_rate_limit",
+                            "error": "24-hour upload safety cap (8 uploads) reached.",
+                        }
+                        rem_clip["youtube_status"] = "Queued for Next Upload Window (Saved in output/)"
+                        rem_clip["file_deleted"] = False
+                        rem_clip["status"] = "Queued for Next Upload Window (Saved in output/)"
+                        self._sync_summary_clip(rem_clip)
+                    break
+
                 file_path = clip.get("file_path") or clip.get("filepath") or clip.get("video_path")
                 title = clip.get("youtube_title") or clip.get("title", f"Short #{idx}")
                 desc = clip.get("youtube_description") or clip.get("description", "#Shorts")
                 tags = clip.get("tags", ["shorts", "viral"])
+                s_slot = clip.get("scheduled_slot") if scheduled else None
 
+                slot_label = f" -> Scheduled: {s_slot['display_plan']}" if s_slot else ""
                 print(f"\n=======================================================")
-                print(f" 🚀 UPLOADING CLIP [{idx}/{total_clips}]: {title}")
+                print(f" 🚀 UPLOADING CLIP [{idx}/{total_clips}]: {title}{slot_label}")
                 print(f"=======================================================")
 
                 if progress_callback:
@@ -1059,13 +1364,31 @@ class YouTubeShortsUploader:
                         description=desc,
                         tags=tags,
                         privacy_status=privacy_status,
+                        scheduled_slot=s_slot,
                         progress_callback=progress_callback,
                     )
                     clip["upload_result"] = res
-                    print(f"✅ Clip [{idx}/{total_clips}] uploaded successfully: {res.get('video_url')}")
+                    recent_uploads += 1
 
-                    # Automatic immediate file cleanup upon confirmed successful upload
-                    if res.get("status") == "uploaded" and res.get("video_url"):
+                    sched_str = f" (Scheduled for {s_slot['display_plan']})" if s_slot else ""
+                    print(f"✅ Clip [{idx}/{total_clips}] uploaded successfully: {res.get('video_url')}{sched_str}")
+
+                    # Record to persistent schedule ledger
+                    if s_slot and res.get("status") in ("scheduled", "uploaded") and res.get("video_url"):
+                        ledger.record_scheduled_clip(
+                            title=title,
+                            video_id=res.get("video_id", "unknown"),
+                            video_url=res.get("video_url", ""),
+                            scheduled_date=s_slot["scheduled_date"],
+                            scheduled_time=s_slot["scheduled_time"],
+                            iso_timestamp=s_slot["iso_timestamp"],
+                            slot_name=s_slot["slot_name"],
+                            channel_id=cid or "active",
+                            clip_id=clip.get("clip_id", idx),
+                        )
+
+                    # Automatic immediate file cleanup upon confirmed successful upload/schedule
+                    if res.get("status") in ("scheduled", "uploaded") and res.get("video_url"):
                         file_name = clip.get("file_name") or (os.path.basename(file_path) if file_path else "")
                         # 1. Immediately delete rendered .mp4 file
                         if file_path and os.path.exists(file_path):
@@ -1081,7 +1404,7 @@ class YouTubeShortsUploader:
                             except Exception:
                                 pass
 
-                        # 2. Also delete any matching raw section video, extracted .wav audio, and .ass subtitle files for that clip inside temp / workspace
+                        # 2. Also delete any matching raw section video, extracted .wav audio, and .ass subtitle files
                         if self.temp_dir and self.temp_dir.exists():
                             stem = Path(file_name).stem if file_name else ""
                             clip_id = clip.get("clip_id", idx)
@@ -1100,9 +1423,10 @@ class YouTubeShortsUploader:
                                         pass
 
                         # 3. Update clip metadata
-                        clip["youtube_status"] = "Uploaded & Deleted Locally"
+                        status_label = "Scheduled & Deleted Locally" if scheduled else "Uploaded & Deleted Locally"
+                        clip["youtube_status"] = status_label
                         clip["file_deleted"] = True
-                        clip["status"] = "Uploaded & Deleted Locally"
+                        clip["status"] = status_label
                         res["file_deleted"] = True
                         self._sync_summary_clip(clip)
                 except DailyUploadLimitError as limit_err:
@@ -1113,9 +1437,9 @@ class YouTubeShortsUploader:
                         "status": "queued_daily_limit",
                         "error": str(limit_err),
                     }
-                    clip["youtube_status"] = "Queued"
+                    clip["youtube_status"] = "Queued for Next Upload Window (Saved in output/)"
                     clip["file_deleted"] = False
-                    clip["status"] = "Queued (Daily Limit Reached - Saved in output/)"
+                    clip["status"] = "Queued for Next Upload Window (Saved in output/)"
                     self._sync_summary_clip(clip)
                     # Mark all subsequent clips as queued without deletion
                     for rem_idx in range(idx, total_clips):
@@ -1124,9 +1448,9 @@ class YouTubeShortsUploader:
                             "status": "queued_daily_limit",
                             "error": "Daily upload limit reached - saved in output/",
                         }
-                        rem_clip["youtube_status"] = "Queued"
+                        rem_clip["youtube_status"] = "Queued for Next Upload Window (Saved in output/)"
                         rem_clip["file_deleted"] = False
-                        rem_clip["status"] = "Queued (Daily Limit Reached - Saved in output/)"
+                        rem_clip["status"] = "Queued for Next Upload Window (Saved in output/)"
                         self._sync_summary_clip(rem_clip)
                     break
                 except Exception as e:
@@ -1150,6 +1474,7 @@ class YouTubeShortsUploader:
             except Exception:
                 pass
 
+        self._display_schedule_plan_table(clips, title_prefix="Final Confirmed")
         return clips
 
     def upload_via_studio(
@@ -1349,6 +1674,8 @@ class YouTubeShortsUploader:
         self,
         clips: List[Dict[str, Any]],
         privacy_status: str = "public",
+        scheduled: bool = True,
+        max_per_day: int = 4,
         dry_run: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[Dict[str, Any]]:
@@ -1378,6 +1705,8 @@ class YouTubeShortsUploader:
         return self.upload_multiple_via_studio(
             clips=clips,
             privacy_status=privacy_status,
+            scheduled=scheduled,
+            max_per_day=max_per_day,
             dry_run=dry_run,
             progress_callback=progress_callback,
         )

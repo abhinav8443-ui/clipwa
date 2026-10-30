@@ -86,6 +86,17 @@ def cli():
     help="YouTube Shorts privacy status (default: public).",
 )
 @click.option("--dry-run-upload", is_flag=True, default=False, help="Test YouTube upload flow without publishing.")
+@click.option(
+    "--schedule/--immediate",
+    default=True,
+    help="Schedule Shorts in research-backed peak engagement windows (default: True).",
+)
+@click.option(
+    "--max-per-day",
+    default=4,
+    type=click.IntRange(1, 4),
+    help="Maximum scheduled Shorts per day (default: 4).",
+)
 def process(
     url_or_file,
     max_clips,
@@ -99,6 +110,8 @@ def process(
     upload,
     privacy,
     dry_run_upload,
+    schedule,
+    max_per_day,
 ):
     """Run full automated pipeline from URL/file to finished YouTube Shorts."""
     print_banner()
@@ -169,6 +182,8 @@ def process(
             words_per_line=words_per_line,
             upload_to_youtube=upload,
             youtube_privacy=privacy,
+            scheduled=schedule,
+            max_per_day=max_per_day,
             dry_run_upload=dry_run_upload,
             progress_callback=callback,
         )
@@ -189,9 +204,14 @@ def process(
         if clip.get("upload_result"):
             res = clip["upload_result"]
             pub_url = res.get("video_url") or res.get("url")
-            if res.get("status") == "uploaded":
-                clean_tag = " [dim](Local file cleaned)[/dim]" if clip.get("local_file_deleted") else ""
-                up_status = f"[green]Published: {pub_url}[/green]{clean_tag}"
+            scheduled_slot = res.get("scheduled_slot") or {}
+            slot_time = scheduled_slot.get("slot_label") or res.get("scheduled_for")
+            if res.get("status") in ("uploaded", "scheduled"):
+                clean_tag = " [dim](Local file cleaned)[/dim]" if (clip.get("file_deleted") or clip.get("local_file_deleted")) else ""
+                if slot_time:
+                    up_status = f"[green]Scheduled: {slot_time}[/green]{clean_tag}"
+                else:
+                    up_status = f"[green]Published: {pub_url}[/green]{clean_tag}"
             elif res.get("status") == "queued_daily_limit":
                 up_status = "[yellow]Queued (Daily Limit Reached - Saved in output/)[/yellow]"
             elif res.get("status") == "dry_run_success":
@@ -199,7 +219,7 @@ def process(
             else:
                 up_status = f"[red]Error: {res.get('error')}[/red]"
 
-        file_disp = str(clip["file_path"]) if not clip.get("local_file_deleted") else "[dim]Cleaned up (Uploaded)[/dim]"
+        file_disp = str(clip["file_path"]) if not (clip.get("file_deleted") or clip.get("local_file_deleted")) else "[dim]Cleaned up (Uploaded/Scheduled)[/dim]"
         table.add_row(
             str(clip["clip_id"]),
             clip["youtube_title"],
@@ -381,12 +401,24 @@ def switch_channel_cmd(timeout):
 @click.option("--dry-run", is_flag=True, default=False, help="Simulate upload without publishing.")
 @click.option("--no-title-upgrade", is_flag=True, default=False, help="Skip AI Brain title upgrading.")
 @click.option("--force", "-f", is_flag=True, default=False, help="Re-upload even if already uploaded.")
-def upload_existing(privacy, summary, dry_run, no_title_upgrade, force):
+@click.option(
+    "--schedule/--immediate",
+    default=True,
+    help="Schedule Shorts in research-backed peak engagement windows (default: True).",
+)
+@click.option(
+    "--max-per-day",
+    default=4,
+    type=click.IntRange(1, 4),
+    help="Maximum scheduled Shorts per day (default: 4).",
+)
+def upload_existing(privacy, summary, dry_run, no_title_upgrade, force, schedule, max_per_day):
     """Upload previously generated clips from output/ directly to YouTube Shorts."""
     print_banner()
     pipeline = ClipwaPipeline()
 
-    console.print(f"[bold cyan]Uploading existing Shorts from output directory ({privacy.upper()})...[/bold cyan]")
+    mode_str = f"Scheduled Mode (Max {max_per_day}/day)" if schedule else f"Immediate Mode ({privacy.upper()})"
+    console.print(f"[bold cyan]Uploading existing Shorts from output directory [{mode_str}]...[/bold cyan]")
 
     def on_progress(stage, message, extra=None):
         if stage in ("upgrade_titles", "start_upload", "uploading_clip", "skip_clip", "finished"):
@@ -400,28 +432,42 @@ def upload_existing(privacy, summary, dry_run, no_title_upgrade, force):
         updated_clips = pipeline.upload_existing_clips(
             summary_path=summary,
             privacy_status=privacy,
+            scheduled=schedule,
+            max_per_day=max_per_day,
             upgrade_titles=not no_title_upgrade,
             force=force,
             dry_run=dry_run,
             progress_callback=on_progress,
         )
 
-        table = Table(title="Uploaded YouTube Shorts", show_header=True, header_style="bold magenta")
+        table = Table(title="YouTube Shorts Upload Status", show_header=True, header_style="bold magenta")
         table.add_column("#", style="dim", width=4)
         table.add_column("Upgraded Viral Title", style="bold white", width=36)
         table.add_column("Duration", justify="right", width=10)
         table.add_column("Virality", justify="center", width=10)
-        table.add_column("YouTube Link", style="cyan", width=34)
+        table.add_column("YouTube Status", style="green", width=34)
 
         for clip in updated_clips:
             res = clip.get("upload_result") or {}
-            url = res.get("video_url") or ("Uploaded" if res.get("status") == "uploaded" else (res.get("error") or "Failed"))
+            slot_info = res.get("scheduled_slot") or {}
+            slot_label = slot_info.get("slot_label") or res.get("scheduled_for")
+            if res.get("status") == "scheduled" or clip.get("youtube_status") == "Scheduled & Deleted Locally":
+                status_disp = f"Scheduled: {slot_label}" if slot_label else "Scheduled & Deleted Locally"
+            elif res.get("status") == "uploaded":
+                status_disp = res.get("video_url") or "Uploaded"
+            elif res.get("status") == "queued_daily_limit":
+                status_disp = "Queued (Daily Cap Reached)"
+            elif res.get("status") == "dry_run_success":
+                status_disp = f"Dry Run OK ({slot_label or 'Simulated'})"
+            else:
+                status_disp = res.get("error") or clip.get("youtube_status") or "Skipped"
+
             table.add_row(
                 str(clip["clip_id"]),
                 clip.get("youtube_title", ""),
                 f"{clip.get('duration', 0):.1f}s",
                 f"{clip.get('virality_score', 85)}%",
-                url,
+                status_disp,
             )
 
         console.print("\n")

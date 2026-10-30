@@ -56,6 +56,8 @@ class ClipwaPipeline:
         words_per_line: int = 3,
         upload_to_youtube: bool = False,
         youtube_privacy: str = "private",
+        scheduled: bool = True,
+        max_per_day: int = 4,
         dry_run_upload: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
@@ -275,6 +277,8 @@ class ClipwaPipeline:
                 self.uploader.upload_multiple(
                     clips=processed_clips,
                     privacy_status=youtube_privacy,
+                    scheduled=scheduled,
+                    max_per_day=max_per_day,
                     dry_run=dry_run_upload,
                     progress_callback=upload_cb,
                 )
@@ -303,11 +307,14 @@ class ClipwaPipeline:
 
     def cleanup_uploaded_clip(self, clip_record: Dict[str, Any]) -> bool:
         """
-        Deletes local .mp4 and associated temporary artifacts for a clip that was successfully uploaded.
-        Updates the clip record status to 'Uploaded & Deleted Locally'.
+        Deletes local .mp4 and associated temporary artifacts for a clip that was successfully uploaded or scheduled.
+        Updates the clip record status to 'Uploaded & Deleted Locally' or 'Scheduled & Deleted Locally'.
         """
         upload_res = clip_record.get("upload_result") or {}
-        if upload_res.get("status") != "uploaded" or not upload_res.get("video_url"):
+        st = upload_res.get("status")
+        if st not in ("uploaded", "scheduled"):
+            if clip_record.get("youtube_status") in ("Scheduled & Deleted Locally", "Uploaded & Deleted Locally"):
+                return True
             return False
 
         file_path_str = clip_record.get("file_path") or ""
@@ -348,9 +355,10 @@ class ClipwaPipeline:
                         pass
 
         # 3. Update record status
-        clip_record["youtube_status"] = "Uploaded & Deleted Locally"
+        final_status = "Scheduled & Deleted Locally" if st == "scheduled" else "Uploaded & Deleted Locally"
+        clip_record["youtube_status"] = final_status
         clip_record["file_deleted"] = True
-        clip_record["status"] = "Uploaded & Deleted Locally"
+        clip_record["status"] = final_status
         upload_res["file_deleted"] = True
         upload_res["local_file_cleaned"] = True
 
@@ -365,9 +373,9 @@ class ClipwaPipeline:
                     if (c.get("clip_id") == clip_record.get("clip_id")) or (
                         c.get("file_name") and c.get("file_name") == clip_record.get("file_name")
                     ):
-                        c["youtube_status"] = "Uploaded & Deleted Locally"
+                        c["youtube_status"] = final_status
                         c["file_deleted"] = True
-                        c["status"] = "Uploaded & Deleted Locally"
+                        c["status"] = final_status
                         c["upload_result"] = upload_res
                         break
                 with open(summary_path, "w", encoding="utf-8") as f:
@@ -381,6 +389,8 @@ class ClipwaPipeline:
         self,
         summary_path: Optional[str] = None,
         privacy_status: str = "public",
+        scheduled: bool = True,
+        max_per_day: int = 4,
         upgrade_titles: bool = True,
         force: bool = False,
         dry_run: bool = False,
@@ -414,11 +424,11 @@ class ClipwaPipeline:
             yt_status = c.get("youtube_status") or c.get("status") or "Skipped"
             is_deleted = c.get("file_deleted", False)
             upload_res = c.get("upload_result") or {}
-            is_uploaded = upload_res.get("status") == "uploaded" and bool(upload_res.get("video_url"))
+            is_uploaded = upload_res.get("status") in ("uploaded", "scheduled") and bool(upload_res.get("video_url") or upload_res.get("scheduled_for"))
 
-            # Skip if already uploaded and deleted
-            if not force and (is_deleted or is_uploaded or yt_status in ("Uploaded & Deleted Locally", "Uploaded & Local File Cleaned")):
-                notify("skip_clip", f"Clip already uploaded: {c.get('youtube_title')} ({upload_res.get('video_url', 'Done')})")
+            # Skip if already uploaded/scheduled and deleted
+            if not force and (is_deleted or is_uploaded or yt_status in ("Uploaded & Deleted Locally", "Uploaded & Local File Cleaned", "Scheduled & Deleted Locally")):
+                notify("skip_clip", f"Clip already uploaded/scheduled: {c.get('youtube_title')} ({upload_res.get('video_url', 'Scheduled')})")
                 continue
 
             # Verify that the .mp4 file actually exists on disk
@@ -444,7 +454,7 @@ class ClipwaPipeline:
 
         if upgrade_titles:
             for clip in clips_to_upload:
-                if (clip.get("upload_result") or {}).get("status") == "uploaded" and not force:
+                if (clip.get("upload_result") or {}).get("status") in ("uploaded", "scheduled") and not force:
                     continue
                 # If title is already a strong hook, keep it; otherwise upgrade
                 cur_title = clip.get("youtube_title", "")
@@ -460,6 +470,8 @@ class ClipwaPipeline:
         self.uploader.upload_multiple(
             clips=clips_to_upload,
             privacy_status=privacy_status,
+            scheduled=scheduled,
+            max_per_day=max_per_day,
             dry_run=dry_run,
             progress_callback=upload_cb,
         )
