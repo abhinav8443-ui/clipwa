@@ -24,6 +24,11 @@ except Exception:
     pass
 
 
+class DailyUploadLimitError(Exception):
+    """Raised when YouTube Studio enforces the 24-hour daily upload limit."""
+    pass
+
+
 class YouTubeShortsUploader:
     """Manages YouTube Shorts authentication and uploads via API or Playwright Studio automation."""
 
@@ -507,34 +512,51 @@ class YouTubeShortsUploader:
             file_input.wait_for(state="attached", timeout=15000)
             file_input.set_input_files(str(video_path))
 
+        def check_daily_limit():
+            for sel in [
+                "ytcp-dialog:has-text('Daily upload limit reached')",
+                "ytcp-dialog:has-text('Upload more videos daily')",
+                "ytcp-dialog:has-text('Daily limit')",
+                "ytcp-dialog:has-text('daily upload limit')",
+                "ytcp-dialog:has-text('wait 24 hours')",
+                ":has-text('Daily upload limit reached')",
+                ":has-text('Upload more videos daily')",
+                ":has-text('daily upload limit')",
+            ]:
+                try:
+                    el = page.locator(sel).first
+                    if el.is_visible():
+                        txt = el.inner_text().strip().replace("\n", " ")
+                        raise DailyUploadLimitError(f"Daily upload limit reached: {txt}")
+                except DailyUploadLimitError:
+                    raise
+                except Exception:
+                    pass
+
         # 4. Wait for Upload Dialog & Title Input
         if progress_callback:
             progress_callback({"stage": "upload", "message": "Video transfer started, entering metadata..."})
 
         # Wait for loading scrim to disappear if present
         try:
-            page.locator(".dialog-scrim").wait_for(state="hidden", timeout=10000)
+            page.locator(".dialog-scrim").wait_for(state="hidden", timeout=5000)
         except Exception:
             pass
 
         title_box = page.locator("#title-textarea #textbox, #textbox[aria-label*='title' i]").first
-        title_box.wait_for(state="visible", timeout=60000)
-        page.wait_for_timeout(1000)
+        title_found = False
+        for _ in range(45):
+            check_daily_limit()
+            if title_box.is_visible():
+                title_found = True
+                break
+            page.wait_for_timeout(1000)
 
-        # Check for daily upload limit or errors
-        for err_sel in [
-            "ytcp-dialog:has-text('Daily upload limit reached')",
-            "ytcp-dialog:has-text('Daily limit')",
-            "#error-dialog",
-        ]:
-            try:
-                err_elem = page.locator(err_sel).first
-                if err_elem.is_visible():
-                    err_text = err_elem.inner_text().strip().replace("\n", " ")
-                    raise RuntimeError(f"YouTube Studio Error: {err_text}")
-            except Exception as ex:
-                if "YouTube Studio Error" in str(ex):
-                    raise ex
+        check_daily_limit()
+
+        if not title_found:
+            title_box.wait_for(state="visible", timeout=15000)
+        page.wait_for_timeout(1000)
 
         # Fill Title
         try:
@@ -796,77 +818,78 @@ class YouTubeShortsUploader:
 
         print(f"[YouTubeUploader] Clicked Publish/Save for '{title}'.")
 
-        # 9. Wait 5 extra seconds after publishing to capture the live YouTube URL
-        print("[YouTubeUploader] Published! Waiting 5s buffer to capture live YouTube URL...")
-        page.wait_for_timeout(5000)
-
+        # 9. Shielded post-publish URL extraction & buffer wait
+        # (Once 100% upload bytes are confirmed and Publish is clicked, the video IS published!)
+        print("[YouTubeUploader] Published! Waiting buffer to capture live YouTube URL...")
         try:
-            share_dialog = page.locator(
-                "ytcp-video-share-dialog, ytcp-uploads-still-processing-dialog, "
-                "ytcp-dialog:has-text('Video published'), ytcp-dialog:has-text('Video uploaded'), "
-                "ytcp-dialog:has-text('published')"
-            ).first
-            share_dialog.wait_for(state="visible", timeout=25000)
-
-            # Extract short URL from share dialog if possible
             try:
-                share_links = page.locator(
-                    "ytcp-video-share-dialog a[href*='youtu.be'], "
-                    "ytcp-video-share-dialog a[href*='youtube.com'], "
-                    "a.ytcp-video-info, a[href*='youtu.be']"
-                )
-                if share_links.count() > 0:
-                    for i in range(share_links.count()):
-                        href = share_links.nth(i).get_attribute("href")
-                        if href and ("youtu.be" in href or "shorts" in href or "watch" in href):
-                            video_url = href
-                            break
+                page.wait_for_timeout(3000)
             except Exception:
                 pass
 
-            # Close share dialog
-            close_btn = page.locator(
-                "ytcp-video-share-dialog #close-button, ytcp-button#close-button, button:has-text('Close'), #close-button"
-            ).first
-            if close_btn.is_visible():
-                close_btn.click()
-                page.wait_for_timeout(2000)
-        except Exception as e:
-            print(f"[YouTubeUploader] Notice waiting for share dialog: {e}")
+            try:
+                share_dialog = page.locator(
+                    "ytcp-video-share-dialog, ytcp-uploads-still-processing-dialog, "
+                    "ytcp-dialog:has-text('Video published'), ytcp-dialog:has-text('Video uploaded'), "
+                    "ytcp-dialog:has-text('published')"
+                ).first
+                share_dialog.wait_for(state="visible", timeout=15000)
 
-        # Fallback to locate URL on page if share dialog didn't provide it
-        if not video_url:
-            for link_sel in [
-                "a.style-scope.ytcp-video-info",
-                "a[href*='youtu.be']",
-                "a[href*='youtube.com/shorts']",
-                "a[href*='watch?v=']",
-                "ytcp-video-list-cell-video a",
-            ]:
+                # Extract short URL from share dialog if possible
                 try:
-                    loc = page.locator(link_sel)
-                    for i in range(loc.count()):
-                        href = loc.nth(i).get_attribute("href")
-                        if href and ("youtu.be" in href or "shorts" in href or "watch" in href):
-                            video_url = href
-                            break
-                    if video_url:
-                        break
+                    share_links = page.locator(
+                        "ytcp-video-share-dialog a[href*='youtu.be'], "
+                        "ytcp-video-share-dialog a[href*='youtube.com'], "
+                        "a.ytcp-video-info, a[href*='youtu.be']"
+                    )
+                    if share_links.count() > 0:
+                        for i in range(share_links.count()):
+                            href = share_links.nth(i).get_attribute("href")
+                            if href and ("youtu.be" in href or "shorts" in href or "watch" in href):
+                                video_url = href
+                                break
                 except Exception:
                     pass
 
-        # 10. Buffer wait after save (5s)
-        print("[YouTubeUploader] Upload confirmed. Waiting 5s buffer...")
-        page.wait_for_timeout(5000)
-
-        # 11. Ensure uploads dialog is detached
-        try:
-            page.wait_for_selector("ytcp-uploads-dialog", state="detached", timeout=5000)
-        except Exception:
-            try:
-                page.keyboard.press("Escape")
+                # Close share dialog
+                close_btn = page.locator(
+                    "ytcp-video-share-dialog #close-button, ytcp-button#close-button, button:has-text('Close'), #close-button"
+                ).first
+                if close_btn.is_visible():
+                    close_btn.click()
             except Exception:
                 pass
+
+            # Fallback to locate URL on page if share dialog didn't provide it
+            if not video_url:
+                for link_sel in [
+                    "a.style-scope.ytcp-video-info",
+                    "a[href*='youtu.be']",
+                    "a[href*='youtube.com/shorts']",
+                    "a[href*='watch?v=']",
+                    "ytcp-video-list-cell-video a",
+                ]:
+                    try:
+                        loc = page.locator(link_sel)
+                        for i in range(loc.count()):
+                            href = loc.nth(i).get_attribute("href")
+                            if href and ("youtu.be" in href or "shorts" in href or "watch" in href):
+                                video_url = href
+                                break
+                        if video_url:
+                            break
+                    except Exception:
+                        pass
+
+            try:
+                page.wait_for_selector("ytcp-uploads-dialog", state="detached", timeout=3000)
+            except Exception:
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[YouTubeUploader] Post-publish link extraction notice: {e}")
 
         vid_id = video_url.split("/")[-1].split("=")[-1] if video_url else "unknown"
         if video_url and "shorts" not in video_url and vid_id != "unknown":
@@ -1022,6 +1045,24 @@ class YouTubeShortsUploader:
                                 res["local_file_cleaned"] = True
                             except Exception as ex:
                                 print(f"[YouTubeUploader] Warning deleting local file {file_path}: {ex}")
+                except DailyUploadLimitError as limit_err:
+                    print(f"\n[YouTubeUploader] ⚠️ {limit_err}")
+                    print("[YouTubeUploader] 🛑 Stopping further uploads for this session.")
+                    print("[YouTubeUploader] 💾 All remaining clips are preserved safely in output/.\n")
+                    clip["upload_result"] = {
+                        "status": "queued_daily_limit",
+                        "error": str(limit_err),
+                    }
+                    clip["status"] = "Queued (Daily Limit Reached - Saved in output/)"
+                    # Mark all subsequent clips as queued without deletion
+                    for rem_idx in range(idx, total_clips):
+                        rem_clip = clips[rem_idx]
+                        rem_clip["upload_result"] = {
+                            "status": "queued_daily_limit",
+                            "error": "Daily upload limit reached - saved in output/",
+                        }
+                        rem_clip["status"] = "Queued (Daily Limit Reached - Saved in output/)"
+                    break
                 except Exception as e:
                     print(f"❌ Clip [{idx}/{total_clips}] upload failed: {e}")
                     clip["upload_result"] = {"error": str(e), "status": "failed"}

@@ -48,8 +48,8 @@ class ClipwaPipeline:
         self,
         url_or_path: str,
         max_clips: int = 3,
-        min_clip_duration: float = 25.0,
-        max_clip_duration: float = 60.0,
+        min_clip_duration: float = 35.0,
+        max_clip_duration: float = 58.0,
         layout_mode: str = "auto",
         caption_theme: str = "hormozi_yellow",
         words_per_line: int = 3,
@@ -212,11 +212,11 @@ class ClipwaPipeline:
                     clip_end=clip_dur,
                 )
 
-            # Render clean 4:3 video with zero-crop face protection + burned subtitles
+            # Render 9:16 vertical Shorts video with zero-crop face protection + burned subtitles
             out_mp4_name = f"{base_filename}_short.mp4"
             notify(
                 "render_clip",
-                f"Rendering 4:3 Clip {clip_num}/{len(moments)}: {moment.get('youtube_title', '')} (Virality: {moment['virality_score']}%)",
+                f"Rendering 9:16 Shorts Clip {clip_num}/{len(moments)}: {moment.get('youtube_title', '')} (Impact: {moment['virality_score']}%)",
                 clip_index=clip_num,
                 total_clips=len(moments),
             )

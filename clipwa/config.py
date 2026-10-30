@@ -69,8 +69,8 @@ class Config:
     TARGET_WIDTH: int = 1080
     TARGET_HEIGHT: int = 1920
     DEFAULT_ASPECT_RATIO: str = "9:16"
-    MIN_CLIP_DURATION: float = 25.0
-    MAX_CLIP_DURATION: float = 60.0
+    MIN_CLIP_DURATION: float = 35.0
+    MAX_CLIP_DURATION: float = 58.0
     DEFAULT_MAX_CLIPS: int = 3
 
     # FFmpeg & FFprobe executables

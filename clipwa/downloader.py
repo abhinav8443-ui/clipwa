@@ -18,6 +18,24 @@ from yt_dlp.utils import download_range_func
 from .config import Config
 
 
+class SilentYDLLogger:
+    """Silences stray external downloader warnings and ffmpeg exit messages from yt-dlp."""
+
+    def debug(self, msg: str) -> None:
+        pass
+
+    def info(self, msg: str) -> None:
+        pass
+
+    def warning(self, msg: str) -> None:
+        pass
+
+    def error(self, msg: str) -> None:
+        # Ignore external ffmpeg control-c/exit code notices
+        if "3436169992" in msg or "ffmpeg exited with code" in msg:
+            return
+
+
 class MediaDownloader:
     """Downloads source media, extracts subtitles/audio, and fetches targeted clip sections."""
 
@@ -69,6 +87,7 @@ class MediaDownloader:
             "no_warnings": True,
             "skip_download": True,
             "ffmpeg_location": self.ffmpeg_dir,
+            "logger": SilentYDLLogger(),
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url_or_path, download=False)
@@ -127,6 +146,7 @@ class MediaDownloader:
             "subtitlesformat": "json3/vtt/srt",
             "outtmpl": f"{sub_prefix}.%(ext)s",
             "ffmpeg_location": self.ffmpeg_dir,
+            "logger": SilentYDLLogger(),
             "quiet": True,
             "no_warnings": True,
         }
@@ -183,6 +203,8 @@ class MediaDownloader:
             "outtmpl": audio_output_template,
             "ffmpeg_location": self.ffmpeg_dir,
             "concurrent_fragment_downloads": 8,
+            "logger": SilentYDLLogger(),
+            "external_downloader": {"default": "native"},
             "quiet": True,
             "no_warnings": True,
             "progress_hooks": [hook] if progress_callback else [],
@@ -267,6 +289,8 @@ class MediaDownloader:
                 "force_keyframes_at_cuts": False,
                 "concurrent_fragment_downloads": 8,
                 "ffmpeg_location": self.ffmpeg_dir,
+                "logger": SilentYDLLogger(),
+                "external_downloader": {"default": "native"},
                 "overwrites": True,
                 "quiet": True,
                 "no_warnings": True,
@@ -335,8 +359,9 @@ class MediaDownloader:
         fallback_opts = {
             "format": "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]/18/b",
             "outtmpl": f"{fallback_base}.%(ext)s",
-            "external_downloader": None,
+            "external_downloader": {"default": "native"},
             "ffmpeg_location": self.ffmpeg_dir,
+            "logger": SilentYDLLogger(),
             "overwrites": True,
             "quiet": True,
             "no_warnings": True,
@@ -552,6 +577,7 @@ class MediaDownloader:
             "outtmpl": video_output_template,
             "merge_output_format": "mp4",
             "ffmpeg_location": self.ffmpeg_dir,
+            "logger": SilentYDLLogger(),
             "concurrent_fragment_downloads": 8,
             "quiet": True,
             "no_warnings": True,

@@ -1,14 +1,16 @@
 """
-AI Brain for viral moment detection and metadata generation.
+AI Brain for value-driven, motivational viral moment detection and metadata generation.
+Prioritizes high-impact resilience stories, 'never give up' mentality, overcoming adversity,
+and actionable life lessons.
 Supports Google GenAI (Gemini 2.5 Flash), Groq, Ollama, Zero-API-key Free LLMs (g4f & Pollinations),
-and Smart Algorithmic Heuristic fallback.
+and Smart Algorithmic Heuristic fallback with full-video chronological sampling and strict deduplication.
 """
 
 import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import urllib.request
 import urllib.error
 
@@ -16,15 +18,58 @@ from .config import Config
 
 
 class ViralMomentDetector:
-    """Identifies top retention, high-virality clips from transcript."""
+    """Identifies top retention, high-value, and inspirational clips from transcripts."""
 
-    VIRAL_KEYWORDS = {
+    MOTIVATIONAL_KEYWORDS = {
+        "never give up": 30,
+        "keep going": 25,
+        "quit": 22,
+        "pain": 22,
+        "discipline": 22,
+        "mindset": 22,
+        "failure": 20,
+        "struggle": 20,
+        "hard work": 20,
+        "lesson": 18,
+        "realized": 18,
+        "purpose": 18,
+        "overcome": 22,
+        "sacrifice": 22,
+        "believe": 18,
+        "pushed": 18,
+        "limits": 20,
+        "suffer": 22,
+        "suffering": 22,
+        "darkest": 22,
+        "proud": 18,
+        "advice": 16,
+        "focus": 16,
+        "goggins": 22,
+        "unbreakable": 25,
+        "endurance": 20,
+        "mental": 18,
+        "impossible": 20,
+        "strength": 18,
+        "fear": 18,
+        "dream": 15,
+        "action": 16,
+        "consistency": 18,
+        "grind": 18,
+        "habit": 16,
+        "truth": 16,
+        "worst": 15,
+        "breakdown": 18,
+        "breakthrough": 22,
+        "champion": 18,
+        "compete": 16,
+    }
+
+    VIRAL_KEYWORDS = set(MOTIVATIONAL_KEYWORDS.keys()).union({
         "secret", "insane", "crazy", "shocking", "unbelievable", "never", "always",
         "mistake", "warning", "truth", "money", "billion", "future", "genius",
         "hidden", "hack", "trick", "rule", "destroy", "win", "stop", "change",
-        "danger", "worst", "best", "powerful", "huge", "revolutionary", "pain",
-        "limits", "exercise", "running", "treadmill", "mindset", "unbreakable", "goggins"
-    }
+        "danger", "best", "powerful", "huge", "revolutionary", "running", "treadmill"
+    })
 
     def __init__(
         self,
@@ -40,14 +85,17 @@ class ViralMomentDetector:
         self,
         transcript_data: Dict[str, Any],
         max_clips: int = 3,
-        min_duration: float = 25.0,
-        max_duration: float = 60.0,
+        min_duration: float = 35.0,
+        max_duration: float = 58.0,
     ) -> List[Dict[str, Any]]:
         """
-        Analyze transcript and return list of top viral moment dictionaries.
+        Analyze transcript and return list of top value-driven, motivational moment dictionaries.
+        Guarantees non-overlapping, chronologically dispersed clips (at least 120s apart).
         """
         segments = transcript_data.get("segments", [])
-        total_duration = transcript_data.get("duration", 0)
+        total_duration = float(transcript_data.get("duration", 0) or 0)
+        if not total_duration and segments:
+            total_duration = float(segments[-1].get("end", 0))
 
         if not segments:
             return []
@@ -61,77 +109,177 @@ class ViralMomentDetector:
                 "start_time": 0.0,
                 "end_time": round(total_duration, 2),
                 "duration": round(total_duration, 2),
-                "virality_score": 90,
+                "virality_score": 95,
                 "hook_text": title,
                 "reason": "Complete concise video segment",
                 "youtube_title": title,
-                "youtube_description": f"{title}\n\n#Shorts #Viral",
-                "tags": ["shorts", "viral", "trending"],
+                "youtube_description": f"{title}\n\n#Shorts #Motivation #Viral",
+                "tags": ["shorts", "motivation", "nevergiveup", "viral"],
             }]
 
-        formatted_transcript = transcript_data.get("formatted_transcript", "")
-        if not formatted_transcript:
-            formatted_transcript = "\n".join(
-                f"[{s['start']:.1f}s - {s['end']:.1f}s] {s['text']}" for s in segments
-            )
+        # Prepare full-video representative chronological sample
+        sampled_transcript = self._sample_transcript_across_video(
+            segments=segments,
+            total_duration=total_duration,
+            target_char_limit=24000,
+        )
+
+        candidates: List[Dict[str, Any]] = []
 
         # 1. Attempt Gemini if API key is provided
         if self.provider == "gemini" and self.api_key:
             try:
-                return self._detect_gemini(formatted_transcript, max_clips, min_duration, max_duration)
+                candidates = self._detect_gemini(sampled_transcript, max_clips * 3, min_duration, max_duration)
             except Exception as e:
                 print(f"[ViralMomentDetector] Gemini API notice ({e}), checking alternative providers...")
 
         # 2. Attempt Groq if API key is provided
-        if Config.GROQ_API_KEY:
+        if not candidates and Config.GROQ_API_KEY:
             try:
-                return self._detect_groq(formatted_transcript, max_clips, min_duration, max_duration)
+                candidates = self._detect_groq(sampled_transcript, max_clips * 3, min_duration, max_duration)
             except Exception as e:
                 print(f"[ViralMomentDetector] Groq API notice ({e}), checking alternative providers...")
 
         # 3. Check local Ollama
-        try:
-            res = self._detect_ollama(formatted_transcript, max_clips, min_duration, max_duration)
-            if res:
-                return res
-        except Exception:
-            pass
+        if not candidates:
+            try:
+                candidates = self._detect_ollama(sampled_transcript, max_clips * 3, min_duration, max_duration)
+            except Exception:
+                pass
 
         # 4. Zero-Config Free Keyless LLM (g4f & Pollinations.ai)
-        try:
-            res = self._detect_free_llm(formatted_transcript, max_clips, min_duration, max_duration)
-            if res and len(res) > 0:
-                print(f"[ViralMomentDetector] Successfully generated {len(res)} viral moments using free keyless AI!")
-                return res
-        except Exception as e:
-            print(f"[ViralMomentDetector] Free online LLM notice: {e}")
+        if not candidates:
+            try:
+                candidates = self._detect_free_llm(sampled_transcript, max_clips * 3, min_duration, max_duration)
+                if candidates:
+                    print(f"[ViralMomentDetector] Successfully generated candidates using free keyless AI!")
+            except Exception as e:
+                print(f"[ViralMomentDetector] Free online LLM notice: {e}")
 
         # 5. Smart Algorithmic Heuristic fallback
-        print("[ViralMomentDetector] Using smart algorithmic viral detector (100% local & free)...")
-        return self._detect_heuristic(segments, max_clips, min_duration, max_duration)
+        if not candidates:
+            print("[ViralMomentDetector] Using smart algorithmic motivational detector (100% local & free)...")
+            candidates = self._detect_heuristic(
+                segments=segments,
+                total_duration=total_duration,
+                max_clips=max_clips * 3,
+                min_dur=min_duration,
+                max_dur=max_duration,
+            )
+
+        # 6. Strict Non-Overlapping Deduplication & Boundary Snapping
+        refined_clips = self._deduplicate_and_refine_clips(
+            raw_clips=candidates,
+            segments=segments,
+            total_duration=total_duration,
+            max_clips=max_clips,
+            min_dur=min_duration,
+            max_dur=max_duration,
+            min_distance_sec=120.0,
+        )
+
+        return refined_clips
+
+    def _sample_transcript_across_video(
+        self,
+        segments: List[Dict[str, Any]],
+        total_duration: float,
+        target_char_limit: int = 24000,
+    ) -> str:
+        """
+        Samples representative conversation windows across the entire duration of the podcast
+        (beginning, middle, and end) with explicit timestamps in seconds.
+        Skips cold intro / host sponsorship reads (first 35s of long videos).
+        """
+        if not segments:
+            return ""
+
+        # Filter out cold intro for long videos (>10 mins)
+        min_start = 35.0 if total_duration > 600 else 0.0
+        usable_segments = [s for s in segments if s.get("start", 0) >= min_start]
+        if not usable_segments:
+            usable_segments = segments
+
+        total_text = "\n".join(
+            f"[{s['start']:.1f}s - {s['end']:.1f}s] {s['text']}" for s in usable_segments
+        )
+
+        if len(total_text) <= target_char_limit:
+            return total_text
+
+        # Divide podcast into 8 to 12 evenly spaced chronological blocks across the full duration
+        num_blocks = 10
+        sampled_blocks: List[str] = []
+        chars_per_block = target_char_limit // num_blocks
+
+        duration_span = total_duration - min_start
+        block_dur = duration_span / num_blocks
+
+        for b in range(num_blocks):
+            b_start = min_start + (b * block_dur)
+            b_end = b_start + block_dur
+            b_segs = [s for s in usable_segments if b_start <= s.get("start", 0) < b_end]
+            if not b_segs:
+                continue
+
+            block_lines = [f"[{s['start']:.1f}s - {s['end']:.1f}s] {s['text']}" for s in b_segs]
+            block_text = "\n".join(block_lines)
+
+            if len(block_text) > chars_per_block:
+                # Find best continuous window within this block with highest motivational keywords
+                best_sub = block_text[:chars_per_block]
+                best_kw = 0
+                step = max(500, chars_per_block // 3)
+                for offset in range(0, len(block_text) - chars_per_block + 1, step):
+                    chunk = block_text[offset : offset + chars_per_block]
+                    kw_score = sum(weight for kw, weight in self.MOTIVATIONAL_KEYWORDS.items() if kw in chunk.lower())
+                    if kw_score > best_kw:
+                        best_kw = kw_score
+                        best_sub = chunk
+                sampled_blocks.append(f"--- [PART {b+1}/{num_blocks} | Time {int(b_start)}s - {int(b_end)}s] ---\n{best_sub}")
+            else:
+                sampled_blocks.append(f"--- [PART {b+1}/{num_blocks} | Time {int(b_start)}s - {int(b_end)}s] ---\n{block_text}")
+
+        return "\n\n".join(sampled_blocks)
 
     def _build_prompt(self, transcript: str, max_clips: int, min_dur: float, max_dur: float) -> str:
-        return f"""You are an elite short-form video editor and viral content strategist (specializing in YouTube Shorts, TikTok, and Instagram Reels).
+        return f"""You are a world-class viral video editor and inspirational storytelling expert (Alex Hormozi, David Goggins, Ryan Holiday style).
 
-Analyze the following transcript with timestamps and select the top {max_clips} most viral, high-retention moments.
+Your task: Select the top {max_clips} MOST POWERFUL, VALUE-DRIVEN, and MOTIVATIONAL moments from the transcript below.
 
-Target constraints:
-- Duration of each clip must be between {min_dur:.0f} and {max_dur:.0f} seconds.
-- Look for: high emotional peaks, powerful advice, controversial opinions, shock value, counterintuitive secrets, or cliffhanger stories.
-- Write ultra-viral, high-CTR YouTube Shorts titles (MUST end with '#Shorts' and be under 60 characters). NEVER write dull titles.
+DO NOT pick random banter, small talk, or generic questions. Focus strictly on moments that deliver REAL LIFE VALUE, DEEP MOTIVATION, and the "NEVER GIVE UP" MENTALITY.
 
-Return STRICT JSON ONLY, adhering to this exact schema:
+CORE THEMES TO TARGET:
+1. Overcoming Adversity & Pain: Being pushed to the absolute limit in life, business, or endurance and refusing to quit.
+2. "Never Give Up" Mentality: Raw stories of resilience, self-belief, discipline, grit, overcoming self-doubt, or embracing the struggle.
+3. Actionable Life Wisdom: Hard-earned life lessons, counterintuitive mindset shifts, or practical advice that genuinely inspires and elevates the viewer.
+
+CRITICAL SHORT-FORM NARRATIVE STRUCTURE (35s to 58s):
+Every clip MUST have a complete, satisfying story arc:
+- [0s - 5s] The Hook: A bold statement, shocking realization, or intriguing question.
+- [5s - 40s] The Meat / Struggle: The real battle, story of endurance, or core mindset explanation.
+- [40s - 58s] The Payoff / Lesson: A powerful concluding punchline, realization, or life lesson that leaves the viewer deeply inspired.
+
+CRITICAL TIMESTAMP RULES:
+- Each clip duration MUST be between {min_dur:.0f} and {max_dur:.0f} seconds (ideal sweet spot: 40s - 55s).
+- NEVER cut mid-sentence! Both start_time and end_time MUST align with complete sentences.
+- SPREAD ACROSS THE VIDEO: Select clips from completely DIFFERENT parts of the video! Every clip's start_time MUST be at least 120 seconds away from any other clip.
+
+TITLES:
+- Write high-CTR, punchy, inspirational YouTube Shorts titles (under 60 characters, MUST end with '#Shorts'). E.g., 'Why Giving Up Is NOT An Option 🔥 #Shorts', 'The Mindset That Beats Extreme Pain 🧠 #Shorts'.
+
+Return a STRICT JSON ARRAY ONLY (no other text, no markdown preamble):
 [
   {{
     "clip_id": 1,
-    "start_time": 12.5,
-    "end_time": 45.0,
-    "virality_score": 95,
-    "hook_text": "The first 3 seconds hook quote...",
-    "reason": "Why this specific moment will hook viewers and stop the scroll",
-    "youtube_title": "The Brutal Truth About Success #Shorts",
-    "youtube_description": "Captivating 1-2 sentence description with relevant hashtags",
-    "tags": ["shorts", "viral", "success", "motivation"]
+    "start_time": 1420.5,
+    "end_time": 1472.0,
+    "virality_score": 98,
+    "hook_text": "The exact opening quote...",
+    "reason": "Why this moment provides deep value or powerful inspiration",
+    "youtube_title": "The Brutal Truth About Discipline #Shorts",
+    "youtube_description": "Powerful 1-2 sentence description with hashtags #Shorts #Motivation #Discipline #Mindset",
+    "tags": ["shorts", "motivation", "mindset", "nevergiveup", "discipline", "viral"]
   }}
 ]
 
@@ -143,7 +291,7 @@ Transcript:
         self, transcript: str, max_clips: int, min_dur: float, max_dur: float
     ) -> List[Dict[str, Any]]:
         """Zero-API-key free LLM moment detection using g4f or pollinations.ai."""
-        sample_transcript = transcript[:10000]
+        sample_transcript = transcript[:22000]
         prompt = self._build_prompt(sample_transcript, max_clips, min_dur, max_dur)
 
         # 1. Try g4f client
@@ -177,7 +325,7 @@ Transcript:
                     "model": "openai",
                     "jsonMode": True
                 },
-                timeout=20
+                timeout=25
             )
             if r.status_code == 200 and r.text:
                 parsed = self._parse_json_response(r.text, max_clips, min_dur, max_dur)
@@ -260,7 +408,312 @@ Transcript:
             return self._parse_json_response(body.get("response", ""), max_clips, min_dur, max_dur)
 
     # -------------------------------------------------------------------------
-    # Smart Heuristic Title Generator
+    # Sentence Boundary Snapping & Strict Deduplication
+    # -------------------------------------------------------------------------
+
+    def _snap_to_clean_sentence(
+        self,
+        raw_start: float,
+        raw_end: float,
+        segments: List[Dict[str, Any]],
+        min_dur: float = 35.0,
+        max_dur: float = 58.0,
+    ) -> Tuple[float, float]:
+        """
+        Snaps start_time and end_time to clean sentence boundaries
+        so the speaker is never cut mid-sentence.
+        """
+        if not segments:
+            return raw_start, raw_end
+
+        # 1. Find segment closest to raw_start
+        start_idx = 0
+        min_start_diff = float("inf")
+        for i, s in enumerate(segments):
+            diff = abs(s.get("start", 0) - raw_start)
+            if diff < min_start_diff:
+                min_start_diff = diff
+                start_idx = i
+
+        snapped_start = segments[start_idx].get("start", raw_start)
+
+        # 2. Find clean closing segment within [min_dur, max_dur]
+        snapped_end = min(snapped_start + max_dur, raw_end)
+        best_end = None
+        best_punc_diff = float("inf")
+
+        ideal_target = snapped_start + 48.0  # Sweet spot for retention
+
+        for j in range(start_idx, len(segments)):
+            seg = segments[j]
+            seg_end = seg.get("end", 0)
+            dur = seg_end - snapped_start
+
+            if dur < min_dur:
+                continue
+            if dur > max_dur:
+                break
+
+            seg_text = seg.get("text", "").strip()
+            # If segment ends with sentence terminator, strongly favor it
+            has_terminator = bool(re.search(r'[.!?]["\']?$', seg_text))
+            diff_from_ideal = abs(dur - 48.0)
+
+            if has_terminator and diff_from_ideal < best_punc_diff:
+                best_punc_diff = diff_from_ideal
+                best_end = seg_end
+
+        if best_end is not None:
+            snapped_end = best_end
+        else:
+            # Fallback: take segment end within bounds closest to ideal duration
+            for j in range(start_idx, len(segments)):
+                seg_end = segments[j].get("end", 0)
+                dur = seg_end - snapped_start
+                if min_dur <= dur <= max_dur:
+                    snapped_end = seg_end
+
+        return round(snapped_start, 2), round(snapped_end, 2)
+
+    def _deduplicate_and_refine_clips(
+        self,
+        raw_clips: List[Dict[str, Any]],
+        segments: List[Dict[str, Any]],
+        total_duration: float,
+        max_clips: int,
+        min_dur: float = 35.0,
+        max_dur: float = 58.0,
+        min_distance_sec: float = 120.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Enforces:
+        1. Clean sentence boundaries (zero mid-sentence cuts).
+        2. Exact 35s - 58s duration.
+        3. Skip cold intro (t >= 35s for long videos).
+        4. Strict non-overlapping: every selected clip's start_time MUST be at least
+           120s away from any already-selected clip.
+        5. Fills any deficit with fresh heuristic candidates from other parts of the video.
+        """
+        min_allowed_start = 35.0 if total_duration > 600 else 0.0
+
+        # Refine candidates
+        refined_cands: List[Dict[str, Any]] = []
+        for c in raw_clips:
+            st = float(c.get("start_time", 0))
+            et = float(c.get("end_time", st + 45.0))
+
+            if st < min_allowed_start:
+                st = min_allowed_start
+                et = st + 45.0
+
+            snapped_st, snapped_et = self._snap_to_clean_sentence(st, et, segments, min_dur, max_dur)
+            dur = round(snapped_et - snapped_st, 2)
+
+            if dur < min_dur or dur > max_dur:
+                continue
+
+            # Extract dialogue text in this window
+            clip_segs = [s.get("text", "") for s in segments if s.get("start", 0) >= snapped_st - 0.5 and s.get("end", 0) <= snapped_et + 0.5]
+            dialogue = " ".join(clip_segs).strip()
+
+            title = c.get("youtube_title") or self.generate_viral_title(dialogue)
+            if "#Shorts" not in title and "#shorts" not in title:
+                title = f"{title.strip()} #Shorts"
+
+            refined_cands.append({
+                "start_time": snapped_st,
+                "end_time": snapped_et,
+                "duration": dur,
+                "virality_score": int(c.get("virality_score", 90)),
+                "hook_text": str(c.get("hook_text") or dialogue[:80] + "..."),
+                "reason": str(c.get("reason") or "High-impact motivational breakthrough"),
+                "youtube_title": title[:70],
+                "youtube_description": f"{dialogue[:200]}...\n\n#Shorts #Motivation #Mindset #NeverGiveUp",
+                "tags": c.get("tags") or ["shorts", "motivation", "mindset", "nevergiveup", "discipline"],
+            })
+
+        # Sort candidate clips by virality_score descending
+        refined_cands.sort(key=lambda x: x["virality_score"], reverse=True)
+
+        selected: List[Dict[str, Any]] = []
+        for cand in refined_cands:
+            st = cand["start_time"]
+            et = cand["end_time"]
+
+            # Strict 120s separation and zero overlap
+            is_valid = True
+            for sel in selected:
+                s_st = sel["start_time"]
+                s_et = sel["end_time"]
+                if abs(st - s_st) < min_distance_sec:
+                    is_valid = False
+                    break
+                if not (et <= s_st - 30.0 or st >= s_et + 30.0):
+                    is_valid = False
+                    break
+
+            if is_valid:
+                cand["clip_id"] = len(selected) + 1
+                selected.append(cand)
+                if len(selected) >= max_clips:
+                    break
+
+        # If we need more clips, run heuristic across under-represented parts of the video
+        if len(selected) < max_clips:
+            heuristic_extras = self._detect_heuristic(
+                segments=segments,
+                total_duration=total_duration,
+                max_clips=max_clips * 4,
+                min_dur=min_dur,
+                max_dur=max_dur,
+            )
+            for cand in heuristic_extras:
+                st = cand["start_time"]
+                et = cand["end_time"]
+                is_valid = True
+                for sel in selected:
+                    s_st = sel["start_time"]
+                    s_et = sel["end_time"]
+                    if abs(st - s_st) < min_distance_sec:
+                        is_valid = False
+                        break
+                    if not (et <= s_st - 30.0 or st >= s_et + 30.0):
+                        is_valid = False
+                        break
+
+                if is_valid:
+                    cand["clip_id"] = len(selected) + 1
+                    selected.append(cand)
+                    if len(selected) >= max_clips:
+                        break
+
+        # Final renumbering and ordering by clip_id
+        for i, c in enumerate(selected, 1):
+            c["clip_id"] = i
+
+        return selected
+
+    # -------------------------------------------------------------------------
+    # Value-Driven Algorithmic Heuristic Scorer
+    # -------------------------------------------------------------------------
+
+    def _detect_heuristic(
+        self,
+        segments: List[Dict[str, Any]],
+        total_duration: float,
+        max_clips: int,
+        min_dur: float,
+        max_dur: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        Rule-based motivational & adversity detector with full-video chronological distribution.
+        Evaluates sliding windows across chronological video epochs based on resilience keyword weights,
+        narrative sentence structure, and emotional intensity.
+        """
+        if not segments:
+            return []
+
+        min_allowed_start = 35.0 if total_duration > 600 else 0.0
+        usable_segments = [s for s in segments if s.get("start", 0) >= min_allowed_start]
+        if not usable_segments:
+            usable_segments = segments
+
+        n = len(usable_segments)
+        candidates: List[Dict[str, Any]] = []
+
+        # Divide podcast into 5 chronological epochs to ensure full-video distribution
+        epoch_count = 5
+        epoch_size = max(1, n // epoch_count)
+
+        for ep in range(epoch_count):
+            ep_start_idx = ep * epoch_size
+            ep_end_idx = min(n, (ep + 1) * epoch_size)
+
+            for i in range(ep_start_idx, ep_end_idx):
+                start_t = usable_segments[i]["start"]
+                current_text = []
+
+                for j in range(i, n):
+                    seg = usable_segments[j]
+                    end_t = seg["end"]
+                    dur = end_t - start_t
+                    current_text.append(seg.get("text", ""))
+
+                    if dur < min_dur:
+                        continue
+                    if dur > max_dur:
+                        break
+
+                    text_combined = " ".join(current_text)
+                    low_text = text_combined.lower()
+                    words = re.findall(r"\w+", low_text)
+
+                    # 1. Pacing score (optimal speech rate: 130-185 wpm)
+                    w_count = len(words)
+                    wpm = (w_count / dur) * 60 if dur > 0 else 0
+                    pacing_score = 25 if (125 <= wpm <= 185) else 12
+
+                    # 2. Motivational & resilience keyword score
+                    keyword_score = 0
+                    for kw, weight in self.MOTIVATIONAL_KEYWORDS.items():
+                        if kw in low_text:
+                            keyword_score += weight
+                    keyword_score = min(45, keyword_score)
+
+                    # 3. Complete sentence closure bonus
+                    ends_cleanly = bool(re.search(r'[.!?]["\']?$', seg.get("text", "").strip()))
+                    closure_bonus = 15 if ends_cleanly else 0
+
+                    # 4. Opening hook bonus
+                    first_seg_text = usable_segments[i].get("text", "").lower()
+                    hook_bonus = 15 if any(kw in first_seg_text for kw in ["why", "never", "always", "pain", "quit", "remember", "people", "if you"]) else 0
+
+                    total_score = min(99, max(50, pacing_score + keyword_score + closure_bonus + hook_bonus))
+
+                    candidates.append({
+                        "start_time": round(start_t, 2),
+                        "end_time": round(end_t, 2),
+                        "duration": round(dur, 2),
+                        "virality_score": int(total_score),
+                        "text": text_combined,
+                    })
+
+        candidates.sort(key=lambda x: x["virality_score"], reverse=True)
+
+        selected: List[Dict[str, Any]] = []
+        min_distance_sec = 120.0
+
+        for cand in candidates:
+            st = cand["start_time"]
+            et = cand["end_time"]
+
+            # Enforce 120s separation
+            if any(abs(st - s["start_time"]) < min_distance_sec or not (et <= s["start_time"] - 30.0 or st >= s["end_time"] + 30.0) for s in selected):
+                continue
+
+            clean_text = self._clean_speech_text(cand["text"])
+            viral_title = self.generate_viral_title(clean_text)
+
+            selected.append({
+                "clip_id": len(selected) + 1,
+                "start_time": cand["start_time"],
+                "end_time": cand["end_time"],
+                "duration": cand["duration"],
+                "virality_score": cand["virality_score"],
+                "hook_text": clean_text[:80] + "...",
+                "reason": f"Powerful resilience dialogue scoring {cand['virality_score']}% motivational impact.",
+                "youtube_title": viral_title,
+                "youtube_description": f"{clean_text[:200]}...\n\n#Shorts #Motivation #Discipline #NeverGiveUp",
+                "tags": ["shorts", "motivation", "mindset", "nevergiveup", "discipline", "viral"],
+            })
+
+            if len(selected) >= max_clips:
+                break
+
+        return selected
+
+    # -------------------------------------------------------------------------
+    # Value-Driven Motivational Title Generator
     # -------------------------------------------------------------------------
 
     @staticmethod
@@ -274,42 +727,78 @@ Transcript:
         return t
 
     def _smart_heuristic_title(self, text: str, context: Optional[str] = None) -> str:
-        """Generate high-CTR, natural viral titles without random word stitching."""
+        """Generate high-CTR, value-driven motivational titles."""
         clean = self._clean_speech_text(text)
         low = clean.lower()
 
-        # Thematic hooks for fitness, habits, recovery, mindset
-        if "exercise" in low or "treadmill" in low or "gym" in low or "workout" in low:
-            return "The 5-Minute Exercise Everyone Skips! 🏃‍♂️ #Shorts"
-        if "pranav" in low or "friend" in low or "show you" in low or "recovery" in low or "insane" in low or "crazy" in low:
-            return "This Crazy Secret Blew My Mind! 🤯 #Shorts"
-        if "train more" in low or "work harder" in low or "good for me" in low or "goggins" in low or "doubt" in low:
-            return "The Mindset That Makes You Unstoppable 🔥 #Shorts"
-        if "money" in low or "rich" in low or "dollar" in low or "business" in low:
-            return "The Financial Rule Nobody Talks About 💰 #Shorts"
-        if "secret" in low or "hack" in low or "mistake" in low:
-            return "The Biggest Mistake You're Making Right Now ⚠️ #Shorts"
+        # Thematic high-CTR motivational titles with rotation to prevent duplicate titles
+        if "quit" in low or "give up" in low or "stopping" in low:
+            titles = [
+                "Why Giving Up Is NEVER An Option 🔥 #Shorts",
+                "What Happens When You Refuse To Quit 💥 #Shorts",
+                "The Secret To Pushing Past The Urge To Quit #Shorts",
+            ]
+            return titles[abs(hash(clean[:30])) % len(titles)]
 
-        # Sentence-based clean declarative title extraction
+        if "pain" in low or "suffer" in low or "hurts" in low:
+            titles = [
+                "How Pain Makes You UNSTOPPABLE 🧠 #Shorts",
+                "The Truth About Suffering And Growth 🔥 #Shorts",
+                "Why You Must Embrace The Pain To Win #Shorts",
+            ]
+            return titles[abs(hash(clean[:30])) % len(titles)]
+
+        if "discipline" in low or "hard work" in low or "routine" in low or "consistent" in low:
+            titles = [
+                "The Brutal Truth About Real Discipline #Shorts",
+                "Discipline Over Motivation Every Single Day #Shorts",
+                "The Unfair Advantage Of Hard Work 🔥 #Shorts",
+            ]
+            return titles[abs(hash(clean[:30])) % len(titles)]
+
+        if "dream" in low or "delusion" in low or "action" in low:
+            titles = [
+                "Stop Dreaming. Start Putting In The Work! #Shorts",
+                "Your Dreams Mean Nothing Without Action #Shorts",
+                "Be Delusional And Go All In 🔥 #Shorts",
+            ]
+            return titles[abs(hash(clean[:30])) % len(titles)]
+
+        if "mindset" in low or "mental" in low or "goggins" in low:
+            titles = [
+                "The 1% Mindset To Push Past Your Limit #Shorts",
+                "How To Build An Unbreakable Mind 🧠 #Shorts",
+                "The Mental Toughness That Changes Everything #Shorts",
+            ]
+            return titles[abs(hash(clean[:30])) % len(titles)]
+
+        if "running" in low or "race" in low or "ultra" in low or "mile" in low or "kilometer" in low:
+            return "He Ran Past The Point Of Exhaustion! 🏃‍♂️ #Shorts"
+        if "fear" in low or "doubt" in low or "failure" in low:
+            return "How To Overcome Self-Doubt And Win 💥 #Shorts"
+        if "lesson" in low or "realized" in low or "advice" in low:
+            return "The Hardest Life Lesson Nobody Tells You #Shorts"
+
+        # Sentence-based clean declarative extraction
         sentences = [s.strip() for s in re.split(r'[.!?]+', clean) if len(s.strip()) > 15]
         if sentences:
             best_s = sentences[0]
             best_s = re.sub(r'^(okay|well|so|you know|and|like|no|yes|actually|in my opinion)\s*,?\s*', '', best_s, flags=re.IGNORECASE)
             words = best_s.split()
-            if 3 <= len(words) <= 9:
+            if 3 <= len(words) <= 8:
                 cand = " ".join(words).title()
                 cand = re.sub(r'[^\w\s]', '', cand)
                 return f"{cand} #Shorts"[:65]
 
-        # General high-engagement fallback
+        # General high-impact fallback
         words = clean.split()
         if len(words) >= 4:
-            clean_words = [w for w in words[:7] if w.lower() not in {"and", "the", "a", "or", "so", "but"}]
+            clean_words = [w for w in words[:6] if w.lower() not in {"and", "the", "a", "or", "so", "but"}]
             cand = " ".join(clean_words).title()
             cand = re.sub(r'[^\w\s]', '', cand)
             return f"{cand} #Shorts"[:65]
 
-        return "Must-Watch High-Retention Clip 🔥 #Shorts"
+        return "The Mindset That Changes Everything 🔥 #Shorts"
 
     def generate_viral_title(self, text: str, context: Optional[str] = None) -> str:
         """Generate high-CTR, punchy YouTube Shorts title using free LLM or smart heuristic."""
@@ -320,8 +809,8 @@ Transcript:
             from g4f.client import Client
             client = Client()
             prompt = (
-                f"Write 1 ultra-viral, catchy, curiosity-inducing YouTube Shorts title (under 55 characters, ending with #Shorts) "
-                f"for a clip with this dialogue: '{clean[:250]}'. Reply with ONLY the title string, no quotes or explanations."
+                f"Write 1 ultra-motivational, punchy YouTube Shorts title (under 55 characters, ending with #Shorts) "
+                f"for this quote: '{clean[:250]}'. Reply with ONLY the title string, no quotes or explanations."
             )
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -360,103 +849,6 @@ Transcript:
 
         return clips
 
-    def _detect_heuristic(
-        self,
-        segments: List[Dict[str, Any]],
-        max_clips: int,
-        min_dur: float,
-        max_dur: float,
-    ) -> List[Dict[str, Any]]:
-        """
-        Rule-based algorithmic peak viral detector.
-        Evaluates sliding windows across segments based on keyword frequency,
-        questions, sentence density, and emotional spikes.
-        """
-        if not segments:
-            return []
-
-        candidates = []
-        n = len(segments)
-
-        for i in range(n):
-            start_t = segments[i]["start"]
-            current_text = []
-
-            for j in range(i, n):
-                seg = segments[j]
-                end_t = seg["end"]
-                dur = end_t - start_t
-                current_text.append(seg["text"])
-
-                if dur < min_dur:
-                    continue
-                if dur > max_dur:
-                    break
-
-                text_combined = " ".join(current_text).lower()
-                words = re.findall(r"\w+", text_combined)
-
-                # Base scoring
-                w_count = len(words)
-                wpm = (w_count / dur) * 60 if dur > 0 else 0
-                pacing_score = 30 if (120 <= wpm <= 190) else 15
-
-                # Keyword score
-                matched_keywords = sum(1 for w in words if w in self.VIRAL_KEYWORDS)
-                keyword_score = min(35, matched_keywords * 7)
-
-                # Question & punctuation excitement
-                q_count = text_combined.count("?")
-                excl_count = text_combined.count("!")
-                punct_score = min(20, (q_count * 8) + (excl_count * 5))
-
-                # Hook boost if first segment starts with strong trigger
-                first_words = re.findall(r"\w+", segments[i]["text"].lower())[:5]
-                hook_boost = 15 if any(w in self.VIRAL_KEYWORDS for w in first_words) else 0
-
-                total_score = min(99, max(50, pacing_score + keyword_score + punct_score + hook_boost))
-
-                candidates.append({
-                    "start_time": round(start_t, 2),
-                    "end_time": round(end_t, 2),
-                    "duration": round(dur, 2),
-                    "virality_score": int(total_score),
-                    "text": " ".join(current_text),
-                })
-
-        candidates.sort(key=lambda x: x["virality_score"], reverse=True)
-
-        selected: List[Dict[str, Any]] = []
-        for cand in candidates:
-            overlap = False
-            for s in selected:
-                if not (cand["end_time"] <= s["start_time"] or cand["start_time"] >= s["end_time"]):
-                    overlap = True
-                    break
-            if not overlap:
-                cand_id = len(selected) + 1
-                clean_text = self._clean_speech_text(cand["text"])
-                words = clean_text.split()
-                hook = " ".join(words[:6]) + "..." if len(words) > 6 else clean_text
-                viral_title = self.generate_viral_title(cand["text"])
-
-                selected.append({
-                    "clip_id": cand_id,
-                    "start_time": cand["start_time"],
-                    "end_time": cand["end_time"],
-                    "duration": cand["duration"],
-                    "virality_score": cand["virality_score"],
-                    "hook_text": hook,
-                    "reason": f"High speaker engagement with {cand['virality_score']}% retention momentum.",
-                    "youtube_title": viral_title,
-                    "youtube_description": f"{clean_text[:200]}...\n\n#Shorts #Viral #Trending",
-                    "tags": ["shorts", "viral", "trending", "clip", "highlight"],
-                })
-                if len(selected) >= max_clips:
-                    break
-
-        return selected
-
     def _parse_json_response(
         self, text: str, max_clips: int, min_dur: float, max_dur: float
     ) -> List[Dict[str, Any]]:
@@ -479,22 +871,22 @@ Transcript:
                 valid_clips = []
                 for idx, item in enumerate(data[:max_clips]):
                     st = float(item.get("start_time", 0))
-                    et = float(item.get("end_time", st + min_dur))
+                    et = float(item.get("end_time", st + 45.0))
                     dur = round(et - st, 2)
                     valid_clips.append({
                         "clip_id": idx + 1,
                         "start_time": round(st, 2),
                         "end_time": round(et, 2),
                         "duration": dur,
-                        "virality_score": int(item.get("virality_score", 85)),
+                        "virality_score": int(item.get("virality_score", 90)),
                         "hook_text": str(item.get("hook_text", "")),
-                        "reason": str(item.get("reason", "High-retention segment")),
-                        "youtube_title": str(item.get("youtube_title", f"Viral Moment #{idx+1} #Shorts")),
-                        "youtube_description": str(item.get("youtube_description", "#Shorts")),
-                        "tags": item.get("tags", ["shorts", "viral"]),
+                        "reason": str(item.get("reason", "Inspirational high-value segment")),
+                        "youtube_title": str(item.get("youtube_title", f"The Mindset Shift #{idx+1} #Shorts")),
+                        "youtube_description": str(item.get("youtube_description", "#Shorts #Motivation")),
+                        "tags": item.get("tags", ["shorts", "motivation", "nevergiveup", "discipline"]),
                     })
                 return valid_clips
-        except Exception as e:
+        except Exception:
             pass
 
         return []

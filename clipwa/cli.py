@@ -56,8 +56,8 @@ def cli():
 @cli.command()
 @click.argument("url_or_file")
 @click.option("--max-clips", "-n", default=3, type=int, help="Number of viral shorts to create (1-5).")
-@click.option("--min-duration", default=25.0, type=float, help="Minimum clip duration in seconds.")
-@click.option("--max-duration", default=60.0, type=float, help="Maximum clip duration in seconds.")
+@click.option("--min-duration", default=35.0, type=float, help="Minimum clip duration in seconds.")
+@click.option("--max-duration", default=58.0, type=float, help="Maximum clip duration in seconds.")
 @click.option(
     "--layout",
     type=click.Choice(["9:16", "blurred_stack", "auto", "face_track", "4:3"], case_sensitive=False),
@@ -187,6 +187,8 @@ def process(
             if res.get("status") == "uploaded":
                 clean_tag = " [dim](Local file cleaned)[/dim]" if clip.get("local_file_deleted") else ""
                 up_status = f"[green]Published: {pub_url}[/green]{clean_tag}"
+            elif res.get("status") == "queued_daily_limit":
+                up_status = "[yellow]Queued (Daily Limit Reached - Saved in output/)[/yellow]"
             elif res.get("status") == "dry_run_success":
                 up_status = "[cyan]Dry Run OK[/cyan]"
             else:
