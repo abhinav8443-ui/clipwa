@@ -88,6 +88,10 @@ class MediaDownloader:
             "skip_download": True,
             "ffmpeg_location": self.ffmpeg_dir,
             "logger": SilentYDLLogger(),
+            "socket_timeout": 30,
+            "retries": 20,
+            "fragment_retries": 20,
+            "skip_unavailable_fragments": True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url_or_path, download=False)
@@ -147,6 +151,10 @@ class MediaDownloader:
             "outtmpl": f"{sub_prefix}.%(ext)s",
             "ffmpeg_location": self.ffmpeg_dir,
             "logger": SilentYDLLogger(),
+            "socket_timeout": 30,
+            "retries": 20,
+            "fragment_retries": 20,
+            "skip_unavailable_fragments": True,
             "quiet": True,
             "no_warnings": True,
         }
@@ -205,6 +213,10 @@ class MediaDownloader:
             "concurrent_fragment_downloads": 8,
             "logger": SilentYDLLogger(),
             "external_downloader": {"default": "native"},
+            "socket_timeout": 30,
+            "retries": 20,
+            "fragment_retries": 20,
+            "skip_unavailable_fragments": True,
             "quiet": True,
             "no_warnings": True,
             "progress_hooks": [hook] if progress_callback else [],
@@ -291,6 +303,10 @@ class MediaDownloader:
                 "ffmpeg_location": self.ffmpeg_dir,
                 "logger": SilentYDLLogger(),
                 "external_downloader": {"default": "native"},
+                "socket_timeout": 30,
+                "retries": 20,
+                "fragment_retries": 20,
+                "skip_unavailable_fragments": True,
                 "overwrites": True,
                 "quiet": True,
                 "no_warnings": True,
@@ -304,49 +320,63 @@ class MediaDownloader:
             if cands:
                 for cand in cands:
                     if cand.endswith((".mp4", ".mkv", ".webm", ".ts")):
-                        downloaded_raw = cand
-                        primary_success = True
-                        break
+                        if os.path.exists(cand) and os.path.getsize(cand) > 1000:
+                            downloaded_raw = cand
+                            primary_success = True
+                            break
         except Exception as e:
             if progress_callback:
                 progress_callback({
                     "stage": "download_notice",
                     "message": f"Section range download notice ({e}). Switching to progressive fallback...",
                 })
+            print(f"[MediaDownloader] Range download encounter: {e}. Switching to progressive stream fallback...")
             primary_success = False
 
         if primary_success and downloaded_raw and os.path.exists(downloaded_raw):
-            raw_dur = self._get_media_duration(downloaded_raw)
-            if raw_dur > dur + 0.5:
-                seek_time = min(offset, max(0.0, raw_dur - dur))
-            else:
-                seek_time = 0.0
-
-            trim_cmd = [
-                self.ffmpeg_path,
-                "-y",
-                "-ss",
-                f"{seek_time:.3f}",
-                "-i",
-                downloaded_raw,
-                "-t",
-                f"{dur:.3f}",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "superfast",
-                "-c:a",
-                "aac",
-                "-movflags",
-                "+faststart",
-                output_path,
-            ]
-            subprocess.run(trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             try:
-                os.remove(downloaded_raw)
-            except Exception:
-                pass
-            return output_path
+                raw_dur = self._get_media_duration(downloaded_raw)
+                if raw_dur > dur + 0.5:
+                    seek_time = min(offset, max(0.0, raw_dur - dur))
+                else:
+                    seek_time = 0.0
+
+                trim_cmd = [
+                    self.ffmpeg_path,
+                    "-y",
+                    "-ss",
+                    f"{seek_time:.3f}",
+                    "-i",
+                    downloaded_raw,
+                    "-t",
+                    f"{dur:.3f}",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "superfast",
+                    "-c:a",
+                    "aac",
+                    "-movflags",
+                    "+faststart",
+                    output_path,
+                ]
+                subprocess.run(trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                    try:
+                        os.remove(downloaded_raw)
+                    except Exception:
+                        pass
+                    return output_path
+                else:
+                    print("[MediaDownloader] Primary cut was empty. Switching to progressive fallback...")
+            except Exception as trim_err:
+                print(f"[MediaDownloader] Primary FFmpeg trim error: {trim_err}. Switching to progressive fallback...")
+            finally:
+                if downloaded_raw and os.path.exists(downloaded_raw):
+                    try:
+                        os.remove(downloaded_raw)
+                    except Exception:
+                        pass
 
         # Fallback Method: Pure Python progressive single-file stream download
         fallback_base = str(self.temp_dir / f"fallback_stream_{int(start_time)}_{int(end_time)}")
@@ -357,19 +387,29 @@ class MediaDownloader:
                 pass
 
         fallback_opts = {
-            "format": "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]/18/b",
+            "format": "18/b[ext=mp4]/b",
             "outtmpl": f"{fallback_base}.%(ext)s",
             "external_downloader": {"default": "native"},
             "ffmpeg_location": self.ffmpeg_dir,
             "logger": SilentYDLLogger(),
+            "socket_timeout": 30,
+            "retries": 20,
+            "fragment_retries": 20,
+            "skip_unavailable_fragments": True,
             "overwrites": True,
             "quiet": True,
             "no_warnings": True,
             "progress_hooks": [hook] if progress_callback else [],
         }
 
-        with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-            ydl.download([url_or_path])
+        try:
+            with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                ydl.download([url_or_path])
+        except Exception as fb_err:
+            print(f"[MediaDownloader] Progressive stream fallback notice ({fb_err}). Retrying with best available format...")
+            fallback_opts["format"] = "bestvideo[height<=720]+bestaudio/best"
+            with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                ydl.download([url_or_path])
 
         fb_cands = glob.glob(f"{fallback_base}.*")
         downloaded_fb = None
@@ -579,6 +619,10 @@ class MediaDownloader:
             "ffmpeg_location": self.ffmpeg_dir,
             "logger": SilentYDLLogger(),
             "concurrent_fragment_downloads": 8,
+            "socket_timeout": 30,
+            "retries": 20,
+            "fragment_retries": 20,
+            "skip_unavailable_fragments": True,
             "quiet": True,
             "no_warnings": True,
             "progress_hooks": [hook] if progress_callback else [],
