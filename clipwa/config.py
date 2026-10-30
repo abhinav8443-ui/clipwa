@@ -65,9 +65,10 @@ class Config:
     WHISPER_DEVICE: str = os.getenv("WHISPER_DEVICE", "cpu")  # cpu or cuda
     WHISPER_COMPUTE_TYPE: str = os.getenv("WHISPER_COMPUTE_TYPE", "int8")  # int8, float16, float32
 
-    # Video Settings
+    # Video Settings - YouTube Shorts 9:16 Vertical Standard (1080x1920)
     TARGET_WIDTH: int = 1080
     TARGET_HEIGHT: int = 1920
+    DEFAULT_ASPECT_RATIO: str = "9:16"
     MIN_CLIP_DURATION: float = 25.0
     MAX_CLIP_DURATION: float = 60.0
     DEFAULT_MAX_CLIPS: int = 3

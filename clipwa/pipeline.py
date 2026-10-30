@@ -212,11 +212,11 @@ class ClipwaPipeline:
                     clip_end=clip_dur,
                 )
 
-            # Render 9:16 vertical video with auto face-tracking or blurred stack + burned subtitles
+            # Render clean 4:3 video with zero-crop face protection + burned subtitles
             out_mp4_name = f"{base_filename}_short.mp4"
             notify(
                 "render_clip",
-                f"Rendering 9:16 Short {clip_num}/{len(moments)}: {moment.get('youtube_title', '')} (Virality: {moment['virality_score']}%)",
+                f"Rendering 4:3 Clip {clip_num}/{len(moments)}: {moment.get('youtube_title', '')} (Virality: {moment['virality_score']}%)",
                 clip_index=clip_num,
                 total_clips=len(moments),
             )
@@ -247,26 +247,29 @@ class ClipwaPipeline:
                 "tags": moment.get("tags", ["shorts", "viral"]),
                 "upload_result": None,
             }
-
-            # Optional YouTube Shorts upload
-            if upload_to_youtube:
-                notify("upload_short", f"Uploading Clip {clip_num} to YouTube Shorts ({youtube_privacy})...")
-                try:
-                    upload_res = self.uploader.upload_short(
-                        video_path=final_clip_path,
-                        title=clip_record["youtube_title"],
-                        description=clip_record["youtube_description"],
-                        tags=clip_record["tags"],
-                        privacy_status=youtube_privacy,
-                        dry_run=dry_run_upload,
-                        progress_callback=lambda d: notify("upload_progress", "Uploading chunk...", d),
-                    )
-                    clip_record["upload_result"] = upload_res
-                except Exception as e:
-                    clip_record["upload_result"] = {"error": str(e)}
-                    notify("upload_error", f"YouTube upload failed: {e}")
-
             processed_clips.append(clip_record)
+
+        # Batch YouTube Upload in persistent browser session if requested
+        if upload_to_youtube and processed_clips:
+            notify("upload_short", f"Uploading {len(processed_clips)} clips to YouTube ({youtube_privacy})...")
+            try:
+                def upload_cb(d: Dict[str, Any]) -> None:
+                    stg = d.get("stage", "upload_progress")
+                    msg = d.get("message", "Uploading...")
+                    notify(stg, msg, d)
+
+                self.uploader.upload_multiple(
+                    clips=processed_clips,
+                    privacy_status=youtube_privacy,
+                    dry_run=dry_run_upload,
+                    progress_callback=upload_cb,
+                )
+            except Exception as e:
+                notify("upload_error", f"YouTube upload failed: {e}")
+
+            # Trigger immediate local file & temp cleanup for every successfully published clip
+            for clip_rec in processed_clips:
+                self.cleanup_uploaded_clip(clip_rec)
 
         results["clips"] = processed_clips
         results["status"] = "completed"
@@ -283,6 +286,57 @@ class ClipwaPipeline:
 
         notify("finished", f"Pipeline complete! {len(processed_clips)} Shorts generated in {results['elapsed_seconds']}s.")
         return results
+
+    def cleanup_uploaded_clip(self, clip_record: Dict[str, Any]) -> bool:
+        """
+        Deletes local .mp4 and associated temporary artifacts for a clip that was successfully uploaded.
+        Updates the clip record status to 'Uploaded & Local File Cleaned'.
+        """
+        upload_res = clip_record.get("upload_result") or {}
+        if upload_res.get("status") != "uploaded" or not upload_res.get("video_url"):
+            return False
+
+        file_path_str = clip_record.get("file_path") or ""
+        file_name = clip_record.get("file_name") or ""
+        deleted = False
+
+        # 1. Delete local .mp4 from output directory
+        target_files = []
+        if file_path_str and os.path.exists(file_path_str):
+            target_files.append(Path(file_path_str))
+        if file_name and (self.output_dir / file_name).exists():
+            target_files.append(self.output_dir / file_name)
+
+        for p in set(target_files):
+            try:
+                p.unlink(missing_ok=True)
+                deleted = True
+                print(f"[ClipwaPipeline] 🗑️ Cleaned up uploaded local file: {p.name}")
+            except Exception as e:
+                print(f"[ClipwaPipeline] Warning deleting {p}: {e}")
+
+        # 2. Delete temporary artifacts (.wav, .ass, raw section)
+        if self.temp_dir.is_dir():
+            stem = Path(file_name).stem if file_name else ""
+            clip_id = clip_record.get("clip_id")
+            patterns = [
+                f"{stem}.*",
+                f"clip_{clip_id}_*.*",
+                f"raw_section_*_{clip_id}.mp4",
+                f"clip_audio_{clip_id}.wav",
+            ]
+            for pat in patterns:
+                for tf in self.temp_dir.glob(pat):
+                    try:
+                        tf.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+        # 3. Update record status
+        clip_record["status"] = "Uploaded & Local File Cleaned"
+        clip_record["local_file_deleted"] = True
+        upload_res["local_file_cleaned"] = True
+        return deleted
 
     def upload_existing_clips(
         self,
@@ -387,6 +441,10 @@ class ClipwaPipeline:
                 dry_run=dry_run,
                 progress_callback=upload_cb,
             )
+
+            # Auto-cleanup files for any newly uploaded clips
+            for c in clips_to_upload:
+                self.cleanup_uploaded_clip(c)
         else:
             notify("finished", "All clips are already uploaded to YouTube!")
 

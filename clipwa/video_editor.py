@@ -259,43 +259,84 @@ class VideoEditor:
         end_time: float,
         output_filename: str,
         subtitle_ass_path: Optional[str] = None,
-        layout_mode: str = "auto",
+        layout_mode: str = "9:16",
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> str:
         """
-        Cut, reframe into 9:16 vertical (1080x1920), burn subtitles, and save final MP4.
-        Upgraded with unsharp mask sharpening, contrast boost, high-bitrate 1080p CRF 18 render,
+        Cut, reframe into proper 9:16 YouTube Shorts vertical format (1080x1920)
+        with zero-crop face protection (blurred background stack),
+        burn subtitles, and save final MP4.
+        Upgraded with unsharp mask sharpening, contrast boost, high-bitrate CRF 18 render,
         0.0s Hook SFX, background retention tune, and broadcast audio compression.
         """
         output_path = str(self.output_dir / output_filename)
         duration = end_time - start_time
 
-        # Framing determination
-        framing = self.analyze_framing(video_path, start_time, end_time)
-        chosen_layout = layout_mode if layout_mode != "auto" else framing["layout"]
+        # Target 9:16 canvas setup (1080x1920) for YouTube Shorts
+        canvas_w = Config.TARGET_WIDTH   # 1080
+        canvas_h = Config.TARGET_HEIGHT  # 1920
 
         filter_parts: List[str] = []
 
         # Video filters with studio-grade sharpening and contrast boost
         enhancement = "unsharp=3:3:0.6:3:3:0.0,eq=saturation=1.08:contrast=1.03"
-        if chosen_layout == "face_track" and "crop_w" in framing:
-            cw = framing["crop_w"]
-            ch = framing["crop_h"]
-            cx = framing["crop_x"]
-            cy = framing["crop_y"]
+
+        if layout_mode == "face_track_tight":
+            # Optional tight face tracking if explicitly requested
+            framing = self.analyze_framing(video_path, start_time, end_time)
+            chosen_layout = "9:16_face_track"
+            if "crop_w" in framing:
+                cw = framing["crop_w"]
+                ch = framing["crop_h"]
+                cx = framing["crop_x"]
+                cy = framing["crop_y"]
+                base_filter = (
+                    f"[0:v]crop={cw}:{ch}:{cx}:{cy},"
+                    f"scale={canvas_w}:{canvas_h}:flags=lanczos,"
+                    f"{enhancement}[scaled]"
+                )
+                current_v = "[scaled]"
+            else:
+                base_filter = (
+                    f"[0:v]scale=w='if(gt(a,9/16),-2,270)':h='if(gt(a,9/16),480,-2)',"
+                    f"crop=270:480:(iw-270)/2:(ih-480)/2,boxblur=12:3,"
+                    f"scale={canvas_w}:{canvas_h}:flags=bicubic,eq=brightness=-0.15:contrast=0.95[bg]; "
+                    f"[0:v]scale=w='if(gt(a,9/16),{canvas_w},-2)':h='if(gt(a,9/16),-2,{canvas_h})':flags=lanczos,"
+                    f"{enhancement}[fg]; "
+                    f"[bg][fg]overlay=(W-w)/2:(H-h)/2[stacked]"
+                )
+                current_v = "[stacked]"
+        elif layout_mode == "4:3":
+            chosen_layout = "4:3_zero_crop"
+            cw_43 = 1440
+            ch_43 = 1080
             base_filter = (
-                f"[0:v]crop={cw}:{ch}:{cx}:{cy},"
-                f"scale={Config.TARGET_WIDTH}:{Config.TARGET_HEIGHT}:flags=lanczos,"
-                f"{enhancement}[scaled]"
-            )
-            current_v = "[scaled]"
-        else:
-            # High-speed blurred background stack layout with crisp sharpened foreground
-            base_filter = (
-                f"[0:v]scale=270:480:force_original_aspect_ratio=increase,"
-                f"crop=270:480,gblur=sigma=15,scale={Config.TARGET_WIDTH}:{Config.TARGET_HEIGHT}[bg]; "
-                f"[0:v]scale={Config.TARGET_WIDTH}:-2,{enhancement}[fg]; "
+                f"[0:v]scale=w='if(gt(a,4/3),-2,360)':h='if(gt(a,4/3),270,-2)',"
+                f"crop=360:270:(iw-360)/2:(ih-270)/2,"
+                f"boxblur=12:3,"
+                f"scale={cw_43}:{ch_43}:flags=bicubic,"
+                f"eq=brightness=-0.14:contrast=0.95[bg]; "
+                f"[0:v]scale=w='if(gt(a,4/3),{cw_43},-2)':h='if(gt(a,4/3),-2,{ch_43})':flags=lanczos,"
+                f"{enhancement}[fg]; "
                 f"[bg][fg]overlay=(W-w)/2:(H-h)/2[stacked]"
+            )
+            current_v = "[stacked]"
+        else:
+            # Default: Proper 9:16 YouTube Shorts Zero-Crop Face Protection Layout (1080x1920)
+            # Background: duplicate scaled & blurred to fill entire 1080x1920 background
+            # Foreground: 100% full uncropped original video centered maintaining native aspect ratio (zero faces cut off)
+            chosen_layout = "9:16_zero_crop_stack"
+            base_filter = (
+                f"[0:v]scale=w='if(gt(a,9/16),-2,270)':h='if(gt(a,9/16),480,-2)',"
+                f"crop=270:480:(iw-270)/2:(ih-480)/2,"
+                f"boxblur=12:3,"
+                f"scale={canvas_w}:{canvas_h}:flags=bicubic,"
+                f"setsar=1,"
+                f"eq=brightness=-0.15:contrast=0.95[bg]; "
+                f"[0:v]scale=w='if(gt(a,9/16),{canvas_w},-2)':h='if(gt(a,9/16),-2,{canvas_h})':flags=lanczos,"
+                f"setsar=1,"
+                f"{enhancement}[fg]; "
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[stacked]"
             )
             current_v = "[stacked]"
 

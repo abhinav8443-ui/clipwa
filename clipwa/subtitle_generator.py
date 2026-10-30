@@ -79,9 +79,11 @@ class SubtitleGenerator:
         """
         subs = SSAFile()
         subs.info["ScriptType"] = "v4.00+"
-        # Explicit 1080x1920 PlayRes so font sizes scale accurately
-        subs.info["PlayResX"] = "1080"
-        subs.info["PlayResY"] = "1920"
+        # Explicit PlayRes (1080x1920 standard 9:16 Shorts) so font sizes scale accurately
+        target_w = Config.TARGET_WIDTH
+        target_h = Config.TARGET_HEIGHT
+        subs.info["PlayResX"] = str(target_w)
+        subs.info["PlayResY"] = str(target_h)
 
         # Base style: Massive Hormozi styling
         style = SSAStyle()
@@ -100,9 +102,9 @@ class SubtitleGenerator:
             style.alignment = Alignment.MIDDLE_CENTER
             style.marginv = 0
         else:
-            # Placed right in the viewer's eye-line at MarginV=480, safely above Shorts overlay
+            # Scaled margin for 1080x1920 canvas (480px from bottom sits right in the lower third, above YouTube UI overlay)
             style.alignment = Alignment.BOTTOM_CENTER
-            style.marginv = 480
+            style.marginv = 480 if target_h >= 1920 else int(target_h * 0.16)
 
         subs.styles["Default"] = style
 

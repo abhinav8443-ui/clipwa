@@ -60,9 +60,9 @@ def cli():
 @click.option("--max-duration", default=60.0, type=float, help="Maximum clip duration in seconds.")
 @click.option(
     "--layout",
-    type=click.Choice(["auto", "face_track", "blurred_stack"], case_sensitive=False),
-    default="auto",
-    help="9:16 Reframing layout.",
+    type=click.Choice(["9:16", "blurred_stack", "auto", "face_track", "4:3"], case_sensitive=False),
+    default="9:16",
+    help="Video layout: 9:16 (YouTube Shorts Zero-Crop Stack), blurred_stack, face_track, or 4:3.",
 )
 @click.option(
     "--theme",
@@ -183,19 +183,22 @@ def process(
         up_status = "Skipped"
         if clip.get("upload_result"):
             res = clip["upload_result"]
+            pub_url = res.get("video_url") or res.get("url")
             if res.get("status") == "uploaded":
-                up_status = f"[green]Published: {res.get('url')}[/green]"
+                clean_tag = " [dim](Local file cleaned)[/dim]" if clip.get("local_file_deleted") else ""
+                up_status = f"[green]Published: {pub_url}[/green]{clean_tag}"
             elif res.get("status") == "dry_run_success":
                 up_status = "[cyan]Dry Run OK[/cyan]"
             else:
                 up_status = f"[red]Error: {res.get('error')}[/red]"
 
+        file_disp = str(clip["file_path"]) if not clip.get("local_file_deleted") else "[dim]Cleaned up (Uploaded)[/dim]"
         table.add_row(
             str(clip["clip_id"]),
             clip["youtube_title"],
             f"{clip['start_time']}s - {clip['end_time']}s ({clip['duration']}s)",
             f"{clip['virality_score']}%",
-            str(clip["file_path"]),
+            file_disp,
             up_status,
         )
 

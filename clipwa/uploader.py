@@ -39,6 +39,52 @@ class YouTubeShortsUploader:
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
         self._youtube_client = None
 
+    def _unlock_profile(self) -> None:
+        """
+        Ensures youtube_auth_profile is completely unlocked before launching Playwright:
+        1. Terminates any zombie chrome/chromium processes holding the user_data_dir.
+        2. Deletes stale SingletonLock, SingletonCookie, SingletonSocket, and LOCK files.
+        """
+        profile_path_str = str(self.user_data_dir.resolve())
+        if sys.platform == "win32":
+            try:
+                ps_script = f"""
+                Get-CimInstance Win32_Process | Where-Object {{
+                    ($_.Name -match 'chrome|chromium') -and ($_.CommandLine -like '*{profile_path_str}*')
+                }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
+                """
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_script],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=8,
+                )
+            except Exception:
+                pass
+
+        time.sleep(0.8)
+
+        # Remove Singleton and lock files from user_data_dir root
+        lock_names = ["SingletonLock", "SingletonCookie", "SingletonSocket", "LOCK", "lockfile"]
+        for fname in lock_names:
+            lock_file = self.user_data_dir / fname
+            try:
+                if lock_file.exists() or lock_file.is_symlink():
+                    lock_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        # Also remove from Default directory
+        default_dir = self.user_data_dir / "Default"
+        if default_dir.is_dir():
+            for fname in ["SingletonLock", "SingletonCookie", "SingletonSocket", "LOCK"]:
+                lf = default_dir / fname
+                try:
+                    if lf.exists() or lf.is_symlink():
+                        lf.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
     # -------------------------------------------------------------------------
     # Engine B: Zero-Config Playwright YouTube Studio Automation
     # -------------------------------------------------------------------------
@@ -53,6 +99,7 @@ class YouTubeShortsUploader:
         except ImportError:
             raise RuntimeError("Playwright is not installed. Run 'pip install playwright && playwright install chromium'")
 
+        self._unlock_profile()
         print(f"\n[YouTubeUploader] Launching browser with persistent profile at: {self.user_data_dir}")
 
         browser_args = [
@@ -178,6 +225,7 @@ class YouTubeShortsUploader:
         except ImportError:
             raise RuntimeError("Playwright is not installed. Run 'pip install playwright && playwright install chromium'")
 
+        self._unlock_profile()
         old_channel_id = "UCzIwY0Z1oiofBgoXEt1uUxg"
 
         browser_args = [
@@ -521,10 +569,19 @@ class YouTubeShortsUploader:
         except Exception as e:
             print(f"[YouTubeUploader] Notice setting audience: {e}")
 
-        # 5. Advance wizard through steps until Visibility step is reached
-        for step_attempt in range(5):
-            vis_check = page.locator('[name="PUBLIC"], tp-yt-paper-radio-button:has-text("Public"), #done-button:not([hidden])').first
-            if vis_check.is_visible():
+        # 5. Advance wizard step-by-step until the Visibility step is active
+        print("[YouTubeUploader] Advancing wizard through steps to Visibility...")
+        for step_attempt in range(6):
+            # Check if Visibility tab is already active
+            vis_active = page.evaluate("""
+                () => {
+                    const visTab = document.querySelector('#step-badge-3[aria-selected="true"], [test-id="VISIBILITY"][aria-selected="true"]');
+                    const pubRadio = document.querySelector('tp-yt-paper-radio-button[name="PUBLIC"]');
+                    const doneBtn = document.querySelector('#done-button:not([hidden])');
+                    return Boolean(visTab || (pubRadio && window.getComputedStyle(pubRadio).display !== 'none') || (doneBtn && window.getComputedStyle(doneBtn).display !== 'none'));
+                }
+            """)
+            if vis_active:
                 print(f"[YouTubeUploader] Visibility step reached.")
                 break
 
@@ -541,20 +598,40 @@ class YouTubeShortsUploader:
                 pass
 
             try:
-                page.locator(".dialog-scrim").wait_for(state="hidden", timeout=3000)
+                page.locator(".dialog-scrim").wait_for(state="hidden", timeout=2000)
             except Exception:
                 pass
 
-            next_btn = page.locator("#next-button, ytcp-button#next-button").first
-            if next_btn.is_visible():
-                for _ in range(20):
-                    is_disabled = next_btn.get_attribute("disabled") or (next_btn.get_attribute("aria-disabled") == "true")
-                    if not is_disabled:
+            # Try clicking Visibility tab header directly if enabled
+            clicked_tab = False
+            for tab_sel in ["#step-badge-3", "ytcp-step-badge:has-text('Visibility')", "div[test-id='VISIBILITY']"]:
+                try:
+                    tab_loc = page.locator(tab_sel).first
+                    if tab_loc.is_visible():
+                        tab_loc.click()
+                        clicked_tab = True
+                        page.wait_for_timeout(1500)
                         break
-                    page.wait_for_timeout(500)
-                next_btn.click(force=True)
-                print(f"[YouTubeUploader] Advanced wizard step {step_attempt + 1}")
-            page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
+            # Click next button if visible and not hidden
+            if not clicked_tab:
+                next_btn = page.locator("#next-button:not([hidden]), ytcp-button#next-button:not([hidden])").first
+                if next_btn.is_visible():
+                    for _ in range(25):
+                        is_disabled = next_btn.get_attribute("disabled") or (next_btn.get_attribute("aria-disabled") == "true")
+                        if not is_disabled:
+                            break
+                        page.wait_for_timeout(500)
+                    try:
+                        next_btn.click(force=True)
+                    except Exception:
+                        page.evaluate("el => el.click()", next_btn)
+                    print(f"[YouTubeUploader] Advanced wizard step {step_attempt + 1}")
+                    page.wait_for_timeout(2000)
+                else:
+                    page.wait_for_timeout(1000)
 
         page.wait_for_timeout(1500)
 
@@ -562,15 +639,34 @@ class YouTubeShortsUploader:
         priv_upper = privacy_status.upper()
         try:
             if priv_upper == "PUBLIC":
-                vis_radio = page.locator('[name="PUBLIC"], tp-yt-paper-radio-button:has-text("Public")').first
+                vis_sel = '[name="PUBLIC"], tp-yt-paper-radio-button:has-text("Public")'
             elif priv_upper == "UNLISTED":
-                vis_radio = page.locator('[name="UNLISTED"], tp-yt-paper-radio-button:has-text("Unlisted")').first
+                vis_sel = '[name="UNLISTED"], tp-yt-paper-radio-button:has-text("Unlisted")'
             else:
-                vis_radio = page.locator('[name="PRIVATE"], tp-yt-paper-radio-button:has-text("Private")').first
+                vis_sel = '[name="PRIVATE"], tp-yt-paper-radio-button:has-text("Private")'
 
-            vis_radio.wait_for(state="visible", timeout=15000)
-            vis_radio.scroll_into_view_if_needed()
-            vis_radio.click(force=True)
+            vis_radio = page.locator(vis_sel).first
+            try:
+                vis_radio.wait_for(state="visible", timeout=10000)
+                vis_radio.scroll_into_view_if_needed()
+                vis_radio.click(force=True)
+            except Exception:
+                pass
+
+            # Enforce visibility via JavaScript in Polymer context
+            page.evaluate(f"""
+                () => {{
+                    const targetName = '{priv_upper}';
+                    const r = document.querySelector(`tp-yt-paper-radio-button[name="${{targetName}}"]`) ||
+                              document.querySelector(`[name="${{targetName}}"]`) ||
+                              Array.from(document.querySelectorAll('tp-yt-paper-radio-button')).find(el => el.innerText && el.innerText.toUpperCase().includes(targetName));
+                    if (r) {{
+                        r.click();
+                        r.setAttribute('checked', 'true');
+                        r.setAttribute('aria-checked', 'true');
+                    }}
+                }}
+            """)
             print(f"[YouTubeUploader] Set visibility to: {priv_upper}")
         except Exception as e:
             print(f"[YouTubeUploader] Notice setting visibility: {e}")
@@ -624,42 +720,93 @@ class YouTubeShortsUploader:
 
             page.wait_for_timeout(1500)
 
+        # STRICT 100% UPLOAD VERIFICATION: Never click Done or close if not finished!
+        if not upload_complete:
+            raise RuntimeError(f"YouTube upload did not reach 100% completion within timeout. Last status: '{status_text}'")
+
         # 8. Click Done / Publish button
-        print(f"[YouTubeUploader] Upload bytes confirmed. Saving / Publishing Short...")
-        done_btn = page.locator(
-            "#done-button, ytcp-button#done-button, button:has-text('Save'), button:has-text('Publish')"
-        ).first
+        print(f"[YouTubeUploader] 100% upload bytes confirmed. Saving / Publishing Short...")
 
-        # If done button is not visible or hidden, check if we need to advance to Visibility step
-        if not done_btn.is_visible():
-            for _ in range(3):
-                nxt = page.locator("#next-button, ytcp-button#next-button").first
-                if nxt.is_visible():
+        # Ensure we are fully on the final publish step
+        for _ in range(4):
+            nxt = page.locator("#next-button:not([hidden]):visible, ytcp-button#next-button:not([hidden]):visible").first
+            if nxt.is_visible():
+                try:
                     nxt.click(force=True)
-                    page.wait_for_timeout(1000)
-                if done_btn.is_visible():
-                    break
+                except Exception:
+                    page.evaluate("el => el.click()", nxt)
+                page.wait_for_timeout(1500)
+            else:
+                break
 
-        done_btn.wait_for(state="attached", timeout=30000)
+        # Re-verify visibility selection right before publish
+        page.evaluate(f"""
+            () => {{
+                const targetName = '{priv_upper}';
+                const r = document.querySelector(`tp-yt-paper-radio-button[name="${{targetName}}"]`) ||
+                          document.querySelector(`[name="${{targetName}}"]`);
+                if (r) {{
+                    r.click();
+                    r.setAttribute('checked', 'true');
+                }}
+            }}
+        """)
+        page.wait_for_timeout(1000)
+
+        # Locate Done / Publish button (specifically not hidden)
+        done_btn = page.locator(
+            "#done-button:not([hidden]):visible, ytcp-button#done-button:not([hidden]):visible, "
+            "button:has-text('Publish'):visible, button:has-text('Save'):visible"
+        ).first
 
         # Wait until Done button is enabled
         for _ in range(35):
-            is_disabled = done_btn.get_attribute("disabled") or (done_btn.get_attribute("aria-disabled") == "true")
-            if not is_disabled and done_btn.is_visible():
-                break
+            if done_btn.is_visible():
+                is_disabled = done_btn.get_attribute("disabled") or (done_btn.get_attribute("aria-disabled") == "true")
+                if not is_disabled:
+                    break
             page.wait_for_timeout(1000)
 
-        done_btn.click(force=True)
+        # Click publish via Playwright and JavaScript fallback
+        published_clicked = False
+        try:
+            if done_btn.is_visible():
+                done_btn.click(timeout=10000)
+                published_clicked = True
+        except Exception:
+            pass
+
+        if not published_clicked:
+            published_clicked = page.evaluate("""
+                () => {
+                    const btn = document.querySelector('#done-button') || 
+                                document.querySelector('ytcp-button#done-button') ||
+                                document.querySelector('button[aria-label="Publish"]') ||
+                                document.querySelector('button[aria-label="Save"]');
+                    if (btn) {
+                        btn.removeAttribute('disabled');
+                        btn.removeAttribute('aria-disabled');
+                        btn.removeAttribute('hidden');
+                        btn.click();
+                        return true;
+                    }
+                    return false;
+                }
+            """)
+
         print(f"[YouTubeUploader] Clicked Publish/Save for '{title}'.")
 
-        # 9. Wait for Share Dialog / Confirmation Modal
+        # 9. Wait 5 extra seconds after publishing to capture the live YouTube URL
+        print("[YouTubeUploader] Published! Waiting 5s buffer to capture live YouTube URL...")
+        page.wait_for_timeout(5000)
+
         try:
             share_dialog = page.locator(
                 "ytcp-video-share-dialog, ytcp-uploads-still-processing-dialog, "
                 "ytcp-dialog:has-text('Video published'), ytcp-dialog:has-text('Video uploaded'), "
                 "ytcp-dialog:has-text('published')"
             ).first
-            share_dialog.wait_for(state="visible", timeout=35000)
+            share_dialog.wait_for(state="visible", timeout=25000)
 
             # Extract short URL from share dialog if possible
             try:
@@ -686,6 +833,27 @@ class YouTubeShortsUploader:
                 page.wait_for_timeout(2000)
         except Exception as e:
             print(f"[YouTubeUploader] Notice waiting for share dialog: {e}")
+
+        # Fallback to locate URL on page if share dialog didn't provide it
+        if not video_url:
+            for link_sel in [
+                "a.style-scope.ytcp-video-info",
+                "a[href*='youtu.be']",
+                "a[href*='youtube.com/shorts']",
+                "a[href*='watch?v=']",
+                "ytcp-video-list-cell-video a",
+            ]:
+                try:
+                    loc = page.locator(link_sel)
+                    for i in range(loc.count()):
+                        href = loc.nth(i).get_attribute("href")
+                        if href and ("youtu.be" in href or "shorts" in href or "watch" in href):
+                            video_url = href
+                            break
+                    if video_url:
+                        break
+                except Exception:
+                    pass
 
         # 10. Buffer wait after save (5s)
         print("[YouTubeUploader] Upload confirmed. Waiting 5s buffer...")
@@ -742,6 +910,9 @@ class YouTubeShortsUploader:
             from playwright.sync_api import sync_playwright
         except ImportError:
             raise RuntimeError("Playwright is not installed. Run 'pip install playwright && playwright install chromium'")
+
+        # Automatically clean up any stale browser locks or zombie processes
+        self._unlock_profile()
 
         browser_args = [
             "--disable-blink-features=AutomationControlled",
@@ -820,9 +991,10 @@ class YouTubeShortsUploader:
                 if idx > 1:
                     try:
                         page.keyboard.press("Escape")
-                        page.wait_for_timeout(500)
-                        page.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30000)
-                        page.wait_for_timeout(2000)
+                        page.wait_for_timeout(1000)
+                        page.goto("https://studio.youtube.com", wait_until="load", timeout=45000)
+                        page.wait_for_selector("#create-icon, button[aria-label='Create']", state="visible", timeout=30000)
+                        page.wait_for_timeout(3000)
                     except Exception:
                         pass
 
@@ -838,6 +1010,18 @@ class YouTubeShortsUploader:
                     )
                     clip["upload_result"] = res
                     print(f"✅ Clip [{idx}/{total_clips}] uploaded successfully: {res.get('video_url')}")
+
+                    # Automatic local file cleanup upon confirmed successful upload
+                    if res.get("status") == "uploaded" and res.get("video_url"):
+                        if file_path and os.path.exists(file_path):
+                            try:
+                                os.remove(file_path)
+                                print(f"[YouTubeUploader] 🗑️ Cleaned up local file: {os.path.basename(file_path)}")
+                                clip["status"] = "Uploaded & Local File Cleaned"
+                                clip["local_file_deleted"] = True
+                                res["local_file_cleaned"] = True
+                            except Exception as ex:
+                                print(f"[YouTubeUploader] Warning deleting local file {file_path}: {ex}")
                 except Exception as e:
                     print(f"❌ Clip [{idx}/{total_clips}] upload failed: {e}")
                     clip["upload_result"] = {"error": str(e), "status": "failed"}
