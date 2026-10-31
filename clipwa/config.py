@@ -2,16 +2,27 @@
 Configuration and environment management for Clipwa.
 """
 
+import json
 import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Union
 
 # Silence C++ logging from TensorFlow Lite, MediaPipe, and Abseil before other modules import them
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["GLOG_minloglevel"] = "3"
 os.environ["ABSL_MIN_LOG_LEVEL"] = "3"
+
+
+def atomic_write_json(file_path: Union[str, Path], data: Any) -> None:
+    """Safely and atomically writes JSON data with default=str to avoid corrupting files on crash."""
+    p = Path(file_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = p.with_suffix(f"{p.suffix}.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+    os.replace(tmp_path, p)
 
 
 def _load_env_file(path: Path) -> None:

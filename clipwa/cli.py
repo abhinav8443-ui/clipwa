@@ -204,8 +204,11 @@ def process(
         if clip.get("upload_result"):
             res = clip["upload_result"]
             pub_url = res.get("video_url") or res.get("url")
-            scheduled_slot = res.get("scheduled_slot") or {}
-            slot_time = scheduled_slot.get("slot_label") or res.get("scheduled_for")
+            slot_data = res.get("scheduled_slot")
+            if isinstance(slot_data, dict):
+                slot_time = slot_data.get("slot_label") or slot_data.get("slot_name") or res.get("scheduled_for")
+            else:
+                slot_time = str(slot_data) if slot_data else res.get("scheduled_for")
             if res.get("status") in ("uploaded", "scheduled"):
                 clean_tag = " [dim](Local file cleaned)[/dim]" if (clip.get("file_deleted") or clip.get("local_file_deleted")) else ""
                 if slot_time:
@@ -449,8 +452,12 @@ def upload_existing(privacy, summary, dry_run, no_title_upgrade, force, schedule
 
         for clip in updated_clips:
             res = clip.get("upload_result") or {}
-            slot_info = res.get("scheduled_slot") or {}
-            slot_label = slot_info.get("slot_label") or res.get("scheduled_for")
+            slot_data = res.get("scheduled_slot")
+            if isinstance(slot_data, dict):
+                slot_label = slot_data.get("slot_label") or slot_data.get("slot_name") or res.get("scheduled_for")
+            else:
+                slot_label = str(slot_data) if slot_data else res.get("scheduled_for")
+
             if res.get("status") == "scheduled" or clip.get("youtube_status") == "Scheduled & Deleted Locally":
                 status_disp = f"Scheduled: {slot_label}" if slot_label else "Scheduled & Deleted Locally"
             elif res.get("status") == "uploaded":

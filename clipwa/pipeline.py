@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .ai_brain import ViralMomentDetector
-from .config import Config
+from .config import Config, atomic_write_json
 from .downloader import MediaDownloader
 from .subtitle_generator import SubtitleGenerator
 from .transcriber import LocalTranscriber
@@ -296,8 +296,7 @@ class ClipwaPipeline:
         # Save metadata summary JSON
         summary_path = str(self.output_dir / "pipeline_summary.json")
         try:
-            with open(summary_path, "w", encoding="utf-8") as f:
-                json.dump(results, f, indent=2, ensure_ascii=False)
+            atomic_write_json(summary_path, results)
             results["summary_file"] = summary_path
         except Exception:
             pass
@@ -378,8 +377,7 @@ class ClipwaPipeline:
                         c["status"] = final_status
                         c["upload_result"] = upload_res
                         break
-                with open(summary_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
+                atomic_write_json(summary_path, data)
             except Exception:
                 pass
 
@@ -481,8 +479,7 @@ class ClipwaPipeline:
             self.cleanup_uploaded_clip(c)
 
         # Update summary file
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        atomic_write_json(path, data)
 
         notify("finished", f"Finished uploading {len(clips_to_upload)} Shorts!")
         return clips

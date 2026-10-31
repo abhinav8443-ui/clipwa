@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .config import Config
+from .config import Config, atomic_write_json
 
 
 @dataclass
@@ -66,11 +66,10 @@ class ScheduleLedger:
             }
 
     def save(self, data: Dict[str, Any]) -> None:
-        """Save ledger data atomically to disk."""
+        """Save ledger data atomically to disk with default=str."""
         data["updated_at"] = datetime.now().isoformat()
         try:
-            with open(self.ledger_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            atomic_write_json(self.ledger_path, data)
         except Exception as e:
             print(f"[ScheduleLedger] Warning writing ledger: {e}")
 
@@ -283,7 +282,7 @@ class PeakSlotResolver:
                 time_str = slot.time_str
 
                 slot_info = {
-                    "datetime": slot_dt,
+                    "datetime": slot_dt.isoformat(),
                     "scheduled_date": date_str,
                     "scheduled_time": time_str,
                     "iso_timestamp": slot_dt.isoformat(),

@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .config import Config
+from .config import Config, atomic_write_json
 from .scheduler import PeakSlotResolver, ScheduleLedger
 
 from rich.console import Console
@@ -28,6 +28,23 @@ try:
         sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
 except Exception:
     pass
+
+
+def _sanitize_youtube_text(text: str) -> str:
+    """
+    Sanitizes text for YouTube titles, descriptions, and metadata.
+    YouTube strictly forbids angle brackets ('<' and '>') and control characters.
+    Also strips leading '>>' speaker markers often found in auto-captions.
+    """
+    if not text:
+        return ""
+    # 1. Strip leading speaker markers like '>>', '>>>', '>> '
+    cleaned = re.sub(r"^\s*>>+\s*", "", str(text))
+    # 2. Strip all '<' and '>' characters strictly forbidden by YouTube
+    cleaned = cleaned.replace("<", "").replace(">", "")
+    # 3. Strip control characters (retain normal newlines/whitespace)
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", cleaned)
+    return cleaned.strip()
 
 
 class DailyUploadLimitError(Exception):
@@ -83,8 +100,7 @@ class YouTubeShortsUploader:
                     if "upload_result" in clip_record:
                         c["upload_result"] = clip_record["upload_result"]
                     break
-            with open(summary_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            atomic_write_json(summary_path, data)
         except Exception as e:
             print(f"[YouTubeUploader] Warning updating pipeline_summary.json: {e}")
 
@@ -171,6 +187,116 @@ class YouTubeShortsUploader:
         except Exception:
             pass
         return scraped
+
+    def _cleanup_stuck_drafts(self, page, target_titles: Optional[List[str]] = None) -> int:
+        """
+        Detects and deletes stuck 'Draft' / failed uploads from YouTube Studio Content -> Shorts.
+        Specifically removes drafts matching target_titles or with visibility 'Draft'.
+        """
+        deleted_count = 0
+        try:
+            print("[YouTubeUploader] Checking for stuck drafts in YouTube Studio Content -> Shorts...")
+            page.goto("https://studio.youtube.com/videos/short", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(2500)
+
+            rows = page.locator("ytcp-video-row")
+            row_count = min(rows.count(), 20)
+
+            for i in range(row_count):
+                try:
+                    current_rows = page.locator("ytcp-video-row")
+                    if i >= current_rows.count():
+                        break
+                    row = current_rows.nth(i)
+                    if not row.is_visible():
+                        continue
+                    text = row.inner_text()
+                    low_text = text.lower()
+
+                    is_target_draft = False
+                    if "draft" in low_text or "uploading 0%" in low_text:
+                        is_target_draft = True
+                    if target_titles:
+                        for tt in target_titles:
+                            if tt.lower() in low_text:
+                                is_target_draft = True
+                                break
+
+                    if is_target_draft:
+                        title_el = row.locator("#video-title").first
+                        r_title = title_el.inner_text().strip() if title_el.count() > 0 else f"Row #{i+1}"
+                        print(f"[YouTubeUploader] 🧹 Found stuck draft row: '{r_title}'. Deleting...")
+
+                        # Method 1: Hover over row and click 3-dots options menu
+                        row.hover()
+                        page.wait_for_timeout(500)
+                        opts_btn = row.locator("#options-button, [aria-label*='Options' i], ytcp-icon-button#options-button").first
+                        if opts_btn.is_visible():
+                            opts_btn.click()
+                            page.wait_for_timeout(800)
+
+                            # Click "Delete forever" or "Delete draft"
+                            del_item = page.locator(
+                                "tp-yt-paper-item:has-text('Delete forever'), paper-item:has-text('Delete forever'), "
+                                "tp-yt-paper-item:has-text('Delete draft'), [test-id='DELETE'], ytcp-menu-service-item-renderer:has-text('Delete')"
+                            ).first
+                            if del_item.is_visible():
+                                del_item.click()
+                                page.wait_for_timeout(1000)
+
+                                chk = page.locator(
+                                    "tp-yt-paper-checkbox:not([checked]), ytcp-checkbox-lit, input[type='checkbox']"
+                                ).first
+                                if chk.is_visible():
+                                    chk.click()
+                                    page.wait_for_timeout(500)
+
+                                confirm_btn = page.locator(
+                                    "#confirm-button, button:has-text('Delete forever'), ytcp-button#confirm-button"
+                                ).first
+                                if confirm_btn.is_visible():
+                                    confirm_btn.click()
+                                    deleted_count += 1
+                                    print(f"[YouTubeUploader] ✅ Deleted stuck draft: '{r_title}'")
+                                    page.wait_for_timeout(2500)
+                                    continue
+
+                        # Method 2: Checkbox on row + top action bar Delete
+                        chk_box = row.locator("tp-yt-paper-checkbox, #checkbox-container, ytcp-checkbox-lit").first
+                        if chk_box.is_visible():
+                            chk_box.click()
+                            page.wait_for_timeout(800)
+                            more_act = page.locator("button:has-text('More actions'), ytcp-button:has-text('More actions')").first
+                            if more_act.is_visible():
+                                more_act.click()
+                                page.wait_for_timeout(600)
+                                del_opt = page.locator("tp-yt-paper-item:has-text('Delete forever'), paper-item:has-text('Delete forever')").first
+                                if del_opt.is_visible():
+                                    del_opt.click()
+                                    page.wait_for_timeout(800)
+                                    ack_chk = page.locator("tp-yt-paper-checkbox, ytcp-checkbox-lit").first
+                                    if ack_chk.is_visible():
+                                        ack_chk.click()
+                                    conf = page.locator("#confirm-button, button:has-text('Delete forever')").first
+                                    if conf.is_visible():
+                                        conf.click()
+                                        deleted_count += 1
+                                        print(f"[YouTubeUploader] ✅ Deleted stuck draft via multi-action bar: '{r_title}'")
+                                        page.wait_for_timeout(2500)
+                except Exception as row_err:
+                    print(f"[YouTubeUploader] Notice deleting draft row: {row_err}")
+
+            if deleted_count > 0:
+                print(f"[YouTubeUploader] Successfully cleaned up {deleted_count} stuck draft(s).")
+            page.goto("https://studio.youtube.com", wait_until="load", timeout=25000)
+            page.wait_for_timeout(1500)
+        except Exception as e:
+            print(f"[YouTubeUploader] Draft cleanup notice: {e}")
+            try:
+                page.goto("https://studio.youtube.com", wait_until="load", timeout=25000)
+            except Exception:
+                pass
+        return deleted_count
 
     def _unlock_profile(self) -> None:
         """
@@ -525,39 +651,42 @@ class YouTubeShortsUploader:
     def _get_upload_status(self, page) -> Tuple[str, Optional[int]]:
         """
         Extract the live upload status string and numeric percentage from YouTube Studio dialog.
+        Uses Playwright's native Shadow-DOM-piercing locators.
         """
-        # 1. Search in progress labels inside dialog
+        status_text = ""
         for sel in [
-            "ytcp-video-upload-progress span.progress-label",
-            "ytcp-uploads-dialog span.progress-label",
+            "ytcp-video-upload-progress .progress-label",
             "ytcp-video-upload-progress",
             "span.progress-label",
+            ".progress-label",
+            "ytcp-uploads-dialog .progress-label",
+            "tp-yt-paper-progress",
         ]:
             try:
-                loc = page.locator(sel)
-                count = loc.count()
-                for i in range(count):
-                    txt = loc.nth(i).inner_text().strip()
-                    # Filter out unrelated draft notices
-                    if txt and "draft" not in txt.lower():
-                        pct_m = re.search(r"(\d+)%", txt)
-                        pct = int(pct_m.group(1)) if pct_m else None
-                        return txt, pct
+                loc = page.locator(sel).first
+                if loc.count() > 0:
+                    txt = (loc.inner_text(timeout=500) or "").strip()
+                    if txt:
+                        status_text = txt
+                        break
             except Exception:
                 pass
 
-        # 2. Search paper-progress or progress bar attributes
-        for sel in ["tp-yt-paper-progress", "#progress-bar"]:
+        if not status_text:
             try:
-                elem = page.locator(sel).first
-                if elem.is_visible():
-                    val = elem.get_attribute("value") or elem.get_attribute("aria-valuenow")
-                    if val and val.isdigit():
-                        return f"Uploading {val}%", int(val)
+                progress_loc = page.locator("ytcp-video-upload-progress, span.progress-label, ytcp-uploads-dialog .progress-label").first
+                if progress_loc.count() > 0:
+                    status_text = (progress_loc.inner_text(timeout=1000) or "").strip()
             except Exception:
                 pass
 
-        return "", None
+        pct = None
+        if status_text:
+            pct_m = re.search(r"(\d+)%", status_text)
+            if pct_m:
+                pct = int(pct_m.group(1))
+
+        return status_text, pct
 
     def _upload_single_clip_in_page(
         self,
@@ -577,10 +706,13 @@ class YouTubeShortsUploader:
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
 
+        title = _sanitize_youtube_text(title)
+        description = _sanitize_youtube_text(description)
+
         # Ensure #Shorts is present in title (max 100 chars)
         if "#Shorts" not in title and "#shorts" not in title:
             title = f"{title.strip()} #Shorts"
-        title = title[:100]
+        title = _sanitize_youtube_text(title)[:100]
 
         # 1. Prepare UI state: dismiss any residual dialogs or tooltips
         try:
@@ -692,7 +824,8 @@ class YouTubeShortsUploader:
             title_box.click(force=True)
             page.keyboard.press("Control+A")
             page.keyboard.press("Backspace")
-            title_box.fill(title)
+            clean_title = _sanitize_youtube_text(title)[:100]
+            title_box.fill(clean_title)
         except Exception as e:
             print(f"[YouTubeUploader] Warning filling title: {e}")
 
@@ -703,8 +836,10 @@ class YouTubeShortsUploader:
                 desc_box.click(force=True)
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
-                full_desc = f"{description}\n\n" + " ".join(f"#{t.strip('#')}" for t in (tags or []))
-                desc_box.fill(full_desc.strip())
+                clean_tags = [_sanitize_youtube_text(t).strip("#") for t in (tags or []) if t]
+                full_desc = f"{description}\n\n" + " ".join(f"#{t}" for t in clean_tags)
+                clean_desc = _sanitize_youtube_text(full_desc)
+                desc_box.fill(clean_desc)
         except Exception as e:
             print(f"[YouTubeUploader] Warning filling description: {e}")
 
@@ -948,11 +1083,13 @@ class YouTubeShortsUploader:
             status_text, pct = self._get_upload_status(page)
             low_text = status_text.lower()
 
+            # Condition 1: Actively uploading chunks
             if "uploading" in low_text:
                 curr_pct = pct if pct is not None else 0
                 if curr_pct != last_pct:
                     last_pct = curr_pct
-                    msg = f"Uploading to YouTube: {curr_pct}%... ({status_text})"
+                    disp_stat = status_text.replace("\n", " ").strip()
+                    msg = f"Uploading to YouTube: {curr_pct}%... ({disp_stat[:70]})"
                     print(f"[YouTubeUploader] {msg}")
                     if progress_callback:
                         progress_callback({
@@ -960,8 +1097,20 @@ class YouTubeShortsUploader:
                             "percent": curr_pct,
                             "message": msg,
                         })
-            elif any(kw in low_text for kw in ["upload complete", "processing sd", "processing hd", "processing", "checks"]):
-                msg = f"Uploading to YouTube: 100%... Upload complete! ({status_text})"
+            # Condition 2: Upload / processing / checks complete keywords
+            elif any(kw in low_text for kw in [
+                "checks complete",
+                "no issues found",
+                "processing complete",
+                "upload complete",
+                "processing hd",
+                "processing sd",
+                "processing",
+                "checks",
+                "hd",
+            ]):
+                clean_stat = status_text.replace("\n", " ").strip()
+                msg = f"Uploading to YouTube: 100%... Upload & checks verified! ({clean_stat[:70]})"
                 print(f"[YouTubeUploader] {msg}")
                 if progress_callback:
                     progress_callback({
@@ -971,8 +1120,33 @@ class YouTubeShortsUploader:
                     })
                 upload_complete = True
                 break
-            elif status_text:
-                pass
+
+            # Condition 3: Done / Schedule button is visible and enabled while not uploading
+            for d_sel in [
+                "#done-button",
+                "ytcp-button#done-button",
+                "button:has-text('Schedule')",
+                "button:has-text('Save')",
+                "button:has-text('Publish')",
+            ]:
+                try:
+                    btn = page.locator(d_sel).first
+                    if btn.count() > 0 and btn.is_visible():
+                        is_dis = (
+                            btn.get_attribute("disabled") is not None
+                            or btn.get_attribute("aria-disabled") == "true"
+                        )
+                        if not is_dis and "uploading" not in low_text:
+                            clean_stat = status_text.replace("\n", " ").strip()
+                            msg = f"Done / Schedule button ({d_sel}) enabled and upload ready! ({clean_stat[:70]})"
+                            print(f"[YouTubeUploader] {msg}")
+                            upload_complete = True
+                            break
+                except Exception:
+                    pass
+
+            if upload_complete:
+                break
 
             page.wait_for_timeout(1500)
 
@@ -1011,15 +1185,14 @@ class YouTubeShortsUploader:
             """)
             page.wait_for_timeout(1000)
 
-        # Locate Done / Schedule / Publish button (specifically not hidden)
+        # Locate Done / Schedule / Publish button
         done_btn = page.locator(
-            "#done-button:not([hidden]):visible, ytcp-button#done-button:not([hidden]):visible, "
-            "button:has-text('Schedule'):visible, button:has-text('Publish'):visible, button:has-text('Save'):visible"
+            "#done-button, ytcp-button#done-button, button:has-text('Schedule'), button:has-text('Publish'), button:has-text('Save')"
         ).first
 
         # Wait until Done button is enabled
         for _ in range(35):
-            if done_btn.is_visible():
+            if done_btn.count() > 0 and done_btn.is_visible():
                 is_disabled = done_btn.get_attribute("disabled") or (done_btn.get_attribute("aria-disabled") == "true")
                 if not is_disabled:
                     break
@@ -1091,6 +1264,7 @@ class YouTubeShortsUploader:
                 share_dialog = page.locator(
                     "ytcp-video-share-dialog, ytcp-uploads-still-processing-dialog, "
                     "ytcp-dialog:has-text('Video published'), ytcp-dialog:has-text('Video uploaded'), "
+                    "ytcp-dialog:has-text('Video scheduled'), ytcp-dialog:has-text('scheduled'), "
                     "ytcp-dialog:has-text('published')"
                 ).first
                 share_dialog.wait_for(state="visible", timeout=15000)
@@ -1290,6 +1464,18 @@ class YouTubeShortsUploader:
             print(f"\n=======================================================")
             print(f" 📺 Active YouTube Channel: {cname or 'Active Channel'} ({cid or 'active'})")
             print(f"=======================================================\n")
+
+            # Clean up any stuck drafts in Content -> Shorts before uploading
+            try:
+                self._cleanup_stuck_drafts(
+                    page,
+                    target_titles=[
+                        "Stop Waiting—Take Action",
+                        "Stop Chasing Perfection",
+                    ],
+                )
+            except Exception as e:
+                print(f"[YouTubeUploader] Notice during draft cleanup: {e}")
 
             # Check live Studio scheduled shorts calendar
             try:
@@ -1557,10 +1743,13 @@ class YouTubeShortsUploader:
 
         youtube = self.get_authenticated_service()
 
+        title = _sanitize_youtube_text(title)
+        description = _sanitize_youtube_text(description)
+
         if "#Shorts" not in title and "#shorts" not in title:
             title = f"{title.strip()} #Shorts"[:100]
 
-        all_tags = list(tags or [])
+        all_tags = [_sanitize_youtube_text(t) for t in (tags or []) if t]
         if "shorts" not in [t.lower() for t in all_tags]:
             all_tags.append("shorts")
 

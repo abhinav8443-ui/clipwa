@@ -14,7 +14,24 @@ from typing import Any, Dict, List, Optional, Tuple
 import urllib.request
 import urllib.error
 
-from .config import Config
+from .config import Config, atomic_write_json
+
+
+def _sanitize_youtube_text(text: str) -> str:
+    """
+    Sanitizes text for YouTube titles, descriptions, and metadata.
+    YouTube strictly forbids angle brackets ('<' and '>') and control characters.
+    Also strips leading '>>' speaker markers often found in auto-captions.
+    """
+    if not text:
+        return ""
+    # 1. Strip leading speaker markers like '>>', '>>>', '>> '
+    cleaned = re.sub(r"^\s*>>+\s*", "", text)
+    # 2. Strip all '<' and '>' characters strictly forbidden by YouTube
+    cleaned = cleaned.replace("<", "").replace(">", "")
+    # 3. Strip control characters (retain normal newlines/whitespace)
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", cleaned)
+    return cleaned.strip()
 
 
 class ViralMomentDetector:
@@ -514,9 +531,9 @@ Transcript:
 
             # Extract dialogue text in this window
             clip_segs = [s.get("text", "") for s in segments if s.get("start", 0) >= snapped_st - 0.5 and s.get("end", 0) <= snapped_et + 0.5]
-            dialogue = " ".join(clip_segs).strip()
+            dialogue = _sanitize_youtube_text(" ".join(clip_segs))
 
-            title = c.get("youtube_title") or self.generate_viral_title(dialogue)
+            title = _sanitize_youtube_text(c.get("youtube_title") or self.generate_viral_title(dialogue))
             if "#Shorts" not in title and "#shorts" not in title:
                 title = f"{title.strip()} #Shorts"
 
@@ -525,10 +542,10 @@ Transcript:
                 "end_time": snapped_et,
                 "duration": dur,
                 "virality_score": int(c.get("virality_score", 90)),
-                "hook_text": str(c.get("hook_text") or dialogue[:80] + "..."),
-                "reason": str(c.get("reason") or "High-impact motivational breakthrough"),
-                "youtube_title": title[:70],
-                "youtube_description": f"{dialogue[:200]}...\n\n#Shorts #Motivation #Mindset #NeverGiveUp",
+                "hook_text": _sanitize_youtube_text(str(c.get("hook_text") or dialogue[:80] + "...")),
+                "reason": _sanitize_youtube_text(str(c.get("reason") or "High-impact motivational breakthrough")),
+                "youtube_title": _sanitize_youtube_text(title[:70]),
+                "youtube_description": _sanitize_youtube_text(f"{dialogue[:200]}...\n\n#Shorts #Motivation #Mindset #NeverGiveUp"),
                 "tags": c.get("tags") or ["shorts", "motivation", "mindset", "nevergiveup", "discipline"],
             })
 
@@ -700,10 +717,10 @@ Transcript:
                 "end_time": cand["end_time"],
                 "duration": cand["duration"],
                 "virality_score": cand["virality_score"],
-                "hook_text": clean_text[:80] + "...",
+                "hook_text": _sanitize_youtube_text(clean_text[:80] + "..."),
                 "reason": f"Powerful resilience dialogue scoring {cand['virality_score']}% motivational impact.",
-                "youtube_title": viral_title,
-                "youtube_description": f"{clean_text[:200]}...\n\n#Shorts #Motivation #Discipline #NeverGiveUp",
+                "youtube_title": _sanitize_youtube_text(viral_title),
+                "youtube_description": _sanitize_youtube_text(f"{clean_text[:200]}...\n\n#Shorts #Motivation #Discipline #NeverGiveUp"),
                 "tags": ["shorts", "motivation", "mindset", "nevergiveup", "discipline", "viral"],
             })
 
@@ -820,12 +837,12 @@ Transcript:
             if "#Shorts" not in cand and "#shorts" not in cand:
                 cand = f"{cand} #Shorts"
             if len(cand) <= 70:
-                return cand
+                return _sanitize_youtube_text(cand)
         except Exception:
             pass
 
         # 2. Smart heuristic fallback
-        return self._smart_heuristic_title(clean, context)
+        return _sanitize_youtube_text(self._smart_heuristic_title(clean, context))
 
     def rewrite_summary_titles(self, summary_path: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -844,8 +861,9 @@ Transcript:
             new_title = self.generate_viral_title(text)
             clip["youtube_title"] = new_title
 
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        atomic_write_json(path, data)
+
+        return clips
 
         return clips
 
