@@ -654,31 +654,33 @@ class YouTubeShortsUploader:
         Uses Playwright's native Shadow-DOM-piercing locators.
         """
         status_text = ""
-        for sel in [
-            "ytcp-video-upload-progress .progress-label",
-            "ytcp-video-upload-progress",
-            "span.progress-label",
-            ".progress-label",
-            "ytcp-uploads-dialog .progress-label",
-            "tp-yt-paper-progress",
-        ]:
-            try:
-                loc = page.locator(sel).first
-                if loc.count() > 0:
-                    txt = (loc.inner_text(timeout=500) or "").strip()
-                    if txt:
-                        status_text = txt
-                        break
-            except Exception:
-                pass
+        # 1. Primary locator per YouTube Studio upload dialog
+        try:
+            progress_loc = page.locator("ytcp-video-upload-progress, span.progress-label, ytcp-uploads-dialog .progress-label").first
+            if progress_loc.count() > 0:
+                status_text = (progress_loc.inner_text(timeout=1000) or "").strip()
+        except Exception:
+            pass
 
+        # 2. Broader locators
         if not status_text:
-            try:
-                progress_loc = page.locator("ytcp-video-upload-progress, span.progress-label, ytcp-uploads-dialog .progress-label").first
-                if progress_loc.count() > 0:
-                    status_text = (progress_loc.inner_text(timeout=1000) or "").strip()
-            except Exception:
-                pass
+            for sel in [
+                "ytcp-video-upload-progress .progress-label",
+                "span.progress-label",
+                ".progress-label",
+                "tp-yt-paper-progress",
+                ".status-container",
+                ".ytcp-uploads-dialog-footer",
+            ]:
+                try:
+                    loc = page.locator(sel).first
+                    if loc.count() > 0:
+                        txt = (loc.inner_text(timeout=500) or "").strip()
+                        if txt:
+                            status_text = txt
+                            break
+                except Exception:
+                    pass
 
         pct = None
         if status_text:
@@ -1123,6 +1125,7 @@ class YouTubeShortsUploader:
 
             # Condition 3: Done / Schedule button is visible and enabled while not uploading
             for d_sel in [
+                "#done-button:not([hidden])",
                 "#done-button",
                 "ytcp-button#done-button",
                 "button:has-text('Schedule')",
@@ -1132,14 +1135,19 @@ class YouTubeShortsUploader:
                 try:
                     btn = page.locator(d_sel).first
                     if btn.count() > 0 and btn.is_visible():
-                        is_dis = (
-                            btn.get_attribute("disabled") is not None
-                            or btn.get_attribute("aria-disabled") == "true"
-                        )
-                        if not is_dis and "uploading" not in low_text:
+                        is_btn_enabled = False
+                        try:
+                            is_btn_enabled = btn.is_enabled()
+                        except Exception:
+                            pass
+                        if not is_btn_enabled:
+                            dis_attr = btn.get_attribute("disabled")
+                            aria_dis = btn.get_attribute("aria-disabled")
+                            is_btn_enabled = (dis_attr is None and aria_dis != "true")
+
+                        if is_btn_enabled and "uploading" not in low_text:
                             clean_stat = status_text.replace("\n", " ").strip()
-                            msg = f"Done / Schedule button ({d_sel}) enabled and upload ready! ({clean_stat[:70]})"
-                            print(f"[YouTubeUploader] {msg}")
+                            print(f"[YouTubeUploader] Done / Schedule button ({d_sel}) is visible and enabled! ({clean_stat[:60] or 'Ready to Schedule'})")
                             upload_complete = True
                             break
                 except Exception:
