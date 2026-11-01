@@ -6,12 +6,27 @@ __pycache__/
 *.egg
 build/
 dist/
+
+# Binaries (>100MB)
+bin/*.exe
+!bin/.gitkeep
+
+# Temporary and output directories
 temp/*
 !temp/.gitkeep
 output/*
 !output/.gitkeep
+
+# Sensitive Credentials & Auth
 .env
 token.json
 client_secrets.json
 youtube_auth_profile/
+*.session
+
+# Cache & IDE
 .cache/
+.pytest_cache/
+.vscode/
+.idea/
+*.png

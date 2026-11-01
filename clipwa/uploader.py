@@ -130,8 +130,12 @@ class YouTubeShortsUploader:
                 res = c.get("upload_result") or {}
                 yt_status = c.get("youtube_status") or c.get("status") or ""
 
-                if res.get("status") in ("scheduled", "uploaded") or "Scheduled" in yt_status:
+                if title_prefix == "Planned":
+                    status_disp = "[cyan]Ready to Schedule[/cyan]"
+                elif res.get("status") in ("scheduled", "uploaded") or "Scheduled" in yt_status:
                     status_disp = "[green]Scheduled | Deleted Locally[/green]"
+                elif res.get("status") == "dry_run_success":
+                    status_disp = "[green]Dry-Run OK (Simulated)[/green]"
                 elif yt_status == "Queued for Next Upload Window (Saved in output/)":
                     status_disp = "[yellow]Queued for Next Window[/yellow]"
                 elif res.get("status") == "failed" or yt_status == "Error":
@@ -202,89 +206,100 @@ class YouTubeShortsUploader:
             rows = page.locator("ytcp-video-row")
             row_count = min(rows.count(), 20)
 
-            for i in range(row_count):
-                try:
-                    current_rows = page.locator("ytcp-video-row")
-                    if i >= current_rows.count():
-                        break
-                    row = current_rows.nth(i)
-                    if not row.is_visible():
-                        continue
-                    text = row.inner_text()
-                    low_text = text.lower()
+            for loop_idx in range(15):
+                rows = page.locator("ytcp-video-row")
+                row_count = min(rows.count(), 15)
+                found_draft = False
 
-                    is_target_draft = False
-                    if "draft" in low_text or "uploading 0%" in low_text:
-                        is_target_draft = True
-                    if target_titles:
-                        for tt in target_titles:
-                            if tt.lower() in low_text:
-                                is_target_draft = True
-                                break
+                for i in range(row_count):
+                    try:
+                        current_rows = page.locator("ytcp-video-row")
+                        if i >= current_rows.count():
+                            break
+                        row = current_rows.nth(i)
+                        if not row.is_visible():
+                            continue
+                        text = row.inner_text()
+                        low_text = text.lower()
 
-                    if is_target_draft:
-                        title_el = row.locator("#video-title").first
-                        r_title = title_el.inner_text().strip() if title_el.count() > 0 else f"Row #{i+1}"
-                        print(f"[YouTubeUploader] 🧹 Found stuck draft row: '{r_title}'. Deleting...")
+                        is_target_draft = False
+                        if "draft" in low_text or "uploading 0%" in low_text:
+                            is_target_draft = True
+                        if target_titles:
+                            for tt in target_titles:
+                                if tt.lower() in low_text:
+                                    is_target_draft = True
+                                    break
 
-                        # Method 1: Hover over row and click 3-dots options menu
-                        row.hover()
-                        page.wait_for_timeout(500)
-                        opts_btn = row.locator("#options-button, [aria-label*='Options' i], ytcp-icon-button#options-button").first
-                        if opts_btn.is_visible():
-                            opts_btn.click()
-                            page.wait_for_timeout(800)
+                        if is_target_draft:
+                            title_el = row.locator("#video-title").first
+                            r_title = title_el.inner_text().strip() if title_el.count() > 0 else f"Row #{i+1}"
+                            print(f"[YouTubeUploader] 🧹 Found stuck draft row: '{r_title}'. Deleting...")
 
-                            # Click "Delete forever" or "Delete draft"
-                            del_item = page.locator(
-                                "tp-yt-paper-item:has-text('Delete forever'), paper-item:has-text('Delete forever'), "
-                                "tp-yt-paper-item:has-text('Delete draft'), [test-id='DELETE'], ytcp-menu-service-item-renderer:has-text('Delete')"
-                            ).first
-                            if del_item.is_visible():
-                                del_item.click()
-                                page.wait_for_timeout(1000)
+                            # Method 1: Hover over row and click 3-dots options menu
+                            row.hover()
+                            page.wait_for_timeout(500)
+                            opts_btn = row.locator("#options-button, [aria-label*='Options' i], ytcp-icon-button#options-button").first
+                            if opts_btn.is_visible():
+                                opts_btn.click()
+                                page.wait_for_timeout(800)
 
-                                chk = page.locator(
-                                    "tp-yt-paper-checkbox:not([checked]), ytcp-checkbox-lit, input[type='checkbox']"
+                                # Click "Delete forever" or "Delete draft"
+                                del_item = page.locator(
+                                    "tp-yt-paper-item:has-text('Delete forever'), paper-item:has-text('Delete forever'), "
+                                    "tp-yt-paper-item:has-text('Delete draft'), [test-id='DELETE'], ytcp-menu-service-item-renderer:has-text('Delete')"
                                 ).first
-                                if chk.is_visible():
-                                    chk.click()
-                                    page.wait_for_timeout(500)
+                                if del_item.is_visible():
+                                    del_item.click()
+                                    page.wait_for_timeout(1000)
 
-                                confirm_btn = page.locator(
-                                    "#confirm-button, button:has-text('Delete forever'), ytcp-button#confirm-button"
-                                ).first
-                                if confirm_btn.is_visible():
-                                    confirm_btn.click()
-                                    deleted_count += 1
-                                    print(f"[YouTubeUploader] ✅ Deleted stuck draft: '{r_title}'")
-                                    page.wait_for_timeout(2500)
-                                    continue
+                                    chk = page.locator(
+                                        "tp-yt-paper-checkbox:not([checked]), ytcp-checkbox-lit, input[type='checkbox']"
+                                    ).first
+                                    if chk.is_visible():
+                                        chk.click()
+                                        page.wait_for_timeout(500)
 
-                        # Method 2: Checkbox on row + top action bar Delete
-                        chk_box = row.locator("tp-yt-paper-checkbox, #checkbox-container, ytcp-checkbox-lit").first
-                        if chk_box.is_visible():
-                            chk_box.click()
-                            page.wait_for_timeout(800)
-                            more_act = page.locator("button:has-text('More actions'), ytcp-button:has-text('More actions')").first
-                            if more_act.is_visible():
-                                more_act.click()
-                                page.wait_for_timeout(600)
-                                del_opt = page.locator("tp-yt-paper-item:has-text('Delete forever'), paper-item:has-text('Delete forever')").first
-                                if del_opt.is_visible():
-                                    del_opt.click()
-                                    page.wait_for_timeout(800)
-                                    ack_chk = page.locator("tp-yt-paper-checkbox, ytcp-checkbox-lit").first
-                                    if ack_chk.is_visible():
-                                        ack_chk.click()
-                                    conf = page.locator("#confirm-button, button:has-text('Delete forever')").first
-                                    if conf.is_visible():
-                                        conf.click()
+                                    confirm_btn = page.locator(
+                                        "#confirm-button, button:has-text('Delete forever'), ytcp-button#confirm-button"
+                                    ).first
+                                    if confirm_btn.is_visible():
+                                        confirm_btn.click()
                                         deleted_count += 1
-                                        print(f"[YouTubeUploader] ✅ Deleted stuck draft via multi-action bar: '{r_title}'")
-                                        page.wait_for_timeout(2500)
-                except Exception as row_err:
-                    print(f"[YouTubeUploader] Notice deleting draft row: {row_err}")
+                                        found_draft = True
+                                        print(f"[YouTubeUploader] ✅ Deleted stuck draft: '{r_title}'")
+                                        page.wait_for_timeout(3000)
+                                        break
+
+                            # Method 2: Checkbox on row + top action bar Delete
+                            chk_box = row.locator("tp-yt-paper-checkbox, #checkbox-container, ytcp-checkbox-lit").first
+                            if chk_box.is_visible():
+                                chk_box.click()
+                                page.wait_for_timeout(800)
+                                more_act = page.locator("button:has-text('More actions'), ytcp-button:has-text('More actions')").first
+                                if more_act.is_visible():
+                                    more_act.click()
+                                    page.wait_for_timeout(600)
+                                    del_opt = page.locator("tp-yt-paper-item:has-text('Delete forever'), paper-item:has-text('Delete forever')").first
+                                    if del_opt.is_visible():
+                                        del_opt.click()
+                                        page.wait_for_timeout(800)
+                                        ack_chk = page.locator("tp-yt-paper-checkbox, ytcp-checkbox-lit").first
+                                        if ack_chk.is_visible():
+                                            ack_chk.click()
+                                        conf = page.locator("#confirm-button, button:has-text('Delete forever')").first
+                                        if conf.is_visible():
+                                            conf.click()
+                                            deleted_count += 1
+                                            found_draft = True
+                                            print(f"[YouTubeUploader] ✅ Deleted stuck draft via multi-action bar: '{r_title}'")
+                                            page.wait_for_timeout(3000)
+                                            break
+                    except Exception as row_err:
+                        print(f"[YouTubeUploader] Notice deleting draft row: {row_err}")
+
+                if not found_draft:
+                    break
 
             if deleted_count > 0:
                 print(f"[YouTubeUploader] Successfully cleaned up {deleted_count} stuck draft(s).")
@@ -977,7 +992,7 @@ class YouTubeShortsUploader:
                         page.keyboard.type(target_date)
                         page.keyboard.press("Enter")
                         page.wait_for_timeout(400)
-                        page.keyboard.press("Escape")
+                        page.keyboard.press("Tab")
                         break
                 except Exception:
                     pass
@@ -1012,7 +1027,7 @@ class YouTubeShortsUploader:
                         page.keyboard.type(target_time)
                         page.keyboard.press("Enter")
                         page.wait_for_timeout(400)
-                        page.keyboard.press("Escape")
+                        page.keyboard.press("Tab")
                         break
                 except Exception:
                     pass
@@ -1208,17 +1223,24 @@ class YouTubeShortsUploader:
 
         # Click schedule/publish via Playwright and JavaScript fallback
         published_clicked = False
-        try:
-            if done_btn.is_visible():
-                done_btn.click(timeout=10000)
-                published_clicked = True
-        except Exception:
-            pass
+        for click_target in [
+            page.locator("#done-button button, ytcp-button#done-button button").first,
+            page.locator("button:has-text('Schedule'), button:has-text('Save'), button:has-text('Publish')").first,
+            done_btn,
+        ]:
+            try:
+                if click_target.count() > 0 and click_target.is_visible():
+                    click_target.click(force=True, timeout=5000)
+                    published_clicked = True
+                    break
+            except Exception:
+                pass
 
         if not published_clicked:
             published_clicked = page.evaluate("""
                 () => {
-                    const btn = document.querySelector('#done-button') || 
+                    const btn = document.querySelector('#done-button button') ||
+                                document.querySelector('#done-button') || 
                                 document.querySelector('ytcp-button#done-button') ||
                                 document.querySelector('button[aria-label="Schedule"]') ||
                                 document.querySelector('button[aria-label="Publish"]') ||
@@ -1477,10 +1499,7 @@ class YouTubeShortsUploader:
             try:
                 self._cleanup_stuck_drafts(
                     page,
-                    target_titles=[
-                        "Stop Waiting—Take Action",
-                        "Stop Chasing Perfection",
-                    ],
+                    target_titles=None,
                 )
             except Exception as e:
                 print(f"[YouTubeUploader] Notice during draft cleanup: {e}")
