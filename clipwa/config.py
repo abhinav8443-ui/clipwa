@@ -127,6 +127,13 @@ class Config:
             import imageio_ffmpeg
             imgio_exe = imageio_ffmpeg.get_ffmpeg_exe()
             if imgio_exe and os.path.exists(imgio_exe):
+                try:
+                    cls.BIN_DIR.mkdir(parents=True, exist_ok=True)
+                    if not local_bin_exe.exists():
+                        shutil.copyfile(imgio_exe, str(local_bin_exe))
+                    return str(local_bin_exe)
+                except Exception:
+                    pass
                 return imgio_exe
         except Exception:
             pass

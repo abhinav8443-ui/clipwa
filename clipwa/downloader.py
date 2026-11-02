@@ -6,7 +6,9 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -28,11 +30,18 @@ class SilentYDLLogger:
         pass
 
     def warning(self, msg: str) -> None:
-        pass
+        # Silence HTTP 429 and common subtitle notices
+        if "HTTP Error 429" in msg or "subtitles" in msg.lower() or "too many requests" in msg.lower():
+            return
 
     def error(self, msg: str) -> None:
-        # Ignore external ffmpeg control-c/exit code notices
-        if "3436169992" in msg or "ffmpeg exited with code" in msg:
+        # Ignore external ffmpeg control-c/exit code notices and HTTP 429 subtitle errors
+        if (
+            "3436169992" in msg
+            or "ffmpeg exited with code" in msg
+            or "HTTP Error 429" in msg
+            or "too many requests" in msg.lower()
+        ):
             return
 
 
@@ -42,13 +51,43 @@ class MediaDownloader:
     def __init__(self, temp_dir: Optional[Path] = None):
         self.temp_dir = temp_dir or Config.TEMP_DIR
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        self.ffmpeg_path = Config.FFMPEG_PATH
-        self.ffprobe_path = Config.FFPROBE_PATH
-        self.ffmpeg_dir = str(Config.BIN_DIR)
 
-        # Ensure ffmpeg dir is in PATH for yt-dlp
+        # Resolve exact ffmpeg path (prefer local bin/ffmpeg.exe)
+        bin_dir = Path(Config.BIN_DIR)
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        ffmpeg_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+        local_ffmpeg = bin_dir / ffmpeg_name
+
+        if not local_ffmpeg.exists():
+            try:
+                import imageio_ffmpeg
+                img_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                if img_exe and os.path.exists(img_exe):
+                    shutil.copyfile(img_exe, str(local_ffmpeg))
+            except Exception:
+                pass
+
+        if local_ffmpeg.exists():
+            self.ffmpeg_path = str(local_ffmpeg.resolve())
+            self.ffmpeg_dir = str(bin_dir.resolve())
+        elif Config.FFMPEG_PATH and os.path.exists(Config.FFMPEG_PATH):
+            self.ffmpeg_path = str(Path(Config.FFMPEG_PATH).resolve())
+            self.ffmpeg_dir = str(Path(self.ffmpeg_path).parent.resolve())
+        else:
+            which_ff = shutil.which("ffmpeg")
+            if which_ff:
+                self.ffmpeg_path = str(Path(which_ff).resolve())
+                self.ffmpeg_dir = str(Path(which_ff).parent.resolve())
+            else:
+                self.ffmpeg_path = "ffmpeg"
+                self.ffmpeg_dir = str(bin_dir.resolve())
+
+        self.ffprobe_path = Config.FFPROBE_PATH
+
+        # Prepend ffmpeg directory to PATH for all subprocesses and yt-dlp internal checks
         current_path = os.environ.get("PATH", "")
-        if self.ffmpeg_dir not in current_path:
+        path_parts = current_path.split(os.pathsep)
+        if self.ffmpeg_dir not in path_parts:
             os.environ["PATH"] = f"{self.ffmpeg_dir}{os.pathsep}{current_path}"
 
     @staticmethod
@@ -86,12 +125,13 @@ class MediaDownloader:
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
-            "ffmpeg_location": self.ffmpeg_dir,
+            "ffmpeg_location": self.ffmpeg_path,
             "logger": SilentYDLLogger(),
             "socket_timeout": 30,
             "retries": 20,
             "fragment_retries": 20,
             "skip_unavailable_fragments": True,
+            "abort_on_error": False,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url_or_path, download=False)
@@ -149,12 +189,15 @@ class MediaDownloader:
             "subtitleslangs": ["en", "en-orig", "en-US", "en-GB"],
             "subtitlesformat": "json3/vtt/srt",
             "outtmpl": f"{sub_prefix}.%(ext)s",
-            "ffmpeg_location": self.ffmpeg_dir,
+            "ffmpeg_location": self.ffmpeg_path,
             "logger": SilentYDLLogger(),
-            "socket_timeout": 30,
-            "retries": 20,
-            "fragment_retries": 20,
+            "socket_timeout": 15,
+            "retries": 1,
+            "fragment_retries": 1,
+            "extractor_retries": 1,
             "skip_unavailable_fragments": True,
+            "ignoreerrors": True,
+            "abort_on_error": False,
             "quiet": True,
             "no_warnings": True,
         }
@@ -162,8 +205,8 @@ class MediaDownloader:
         try:
             with yt_dlp.YoutubeDL(sub_opts) as ydl:
                 ydl.download([url_or_path])
-        except Exception as e:
-            print(f"[MediaDownloader] Subtitle check notice: {e}")
+        except Exception:
+            pass
 
         # Check if subtitle file was downloaded
         found_subs = glob.glob(f"{sub_prefix}*.json3") or glob.glob(f"{sub_prefix}*.vtt") or glob.glob(f"{sub_prefix}*.srt")
@@ -189,7 +232,7 @@ class MediaDownloader:
 
         # Fallback: Download audio-only at low bitrate
         if progress_callback:
-            progress_callback({"stage": "download_audio", "message": "Downloading low-bitrate audio for Whisper..."})
+            progress_callback({"stage": "download_audio", "message": "Downloading audio for Whisper..."})
 
         audio_output_template = str(self.temp_dir / f"{base_name}_audio.%(ext)s")
 
@@ -207,16 +250,17 @@ class MediaDownloader:
                 })
 
         audio_opts = {
-            "format": "ba[abr<=64]/worstaudio/ba/b",
+            "format": "ba[abr<=64]/ba[ext=m4a]/ba/b",
             "outtmpl": audio_output_template,
-            "ffmpeg_location": self.ffmpeg_dir,
+            "ffmpeg_location": self.ffmpeg_path,
             "concurrent_fragment_downloads": 8,
             "logger": SilentYDLLogger(),
             "external_downloader": {"default": "native"},
             "socket_timeout": 30,
-            "retries": 20,
-            "fragment_retries": 20,
+            "retries": 10,
+            "fragment_retries": 10,
             "skip_unavailable_fragments": True,
+            "abort_on_error": False,
             "quiet": True,
             "no_warnings": True,
             "progress_hooks": [hook] if progress_callback else [],
@@ -295,18 +339,20 @@ class MediaDownloader:
 
         try:
             ydl_opts = {
-                "format": "bv*[height<=1080][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=1080]+ba/b[height<=1080]/best",
+                "format": "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[ext=mp4]/b",
                 "outtmpl": f"{temp_base}.%(ext)s",
+                "merge_output_format": "mp4",
                 "download_ranges": download_range_func(None, ranges),
                 "force_keyframes_at_cuts": False,
                 "concurrent_fragment_downloads": 8,
-                "ffmpeg_location": self.ffmpeg_dir,
+                "ffmpeg_location": self.ffmpeg_path,
                 "logger": SilentYDLLogger(),
                 "external_downloader": {"default": "native"},
                 "socket_timeout": 30,
                 "retries": 20,
                 "fragment_retries": 20,
                 "skip_unavailable_fragments": True,
+                "abort_on_error": False,
                 "overwrites": True,
                 "quiet": True,
                 "no_warnings": True,
@@ -378,7 +424,7 @@ class MediaDownloader:
                     except Exception:
                         pass
 
-        # Fallback Method: Pure Python progressive single-file stream download
+        # Fallback Method: Progressive / DASH stream download with FFmpeg merge
         fallback_base = str(self.temp_dir / f"fallback_stream_{int(start_time)}_{int(end_time)}")
         for old_f in glob.glob(f"{fallback_base}*"):
             try:
@@ -387,10 +433,12 @@ class MediaDownloader:
                 pass
 
         fallback_opts = {
-            "format": "18/b[ext=mp4]/b",
+            "format": "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[ext=mp4]/b",
             "outtmpl": f"{fallback_base}.%(ext)s",
+            "merge_output_format": "mp4",
+            "abort_on_error": False,
             "external_downloader": {"default": "native"},
-            "ffmpeg_location": self.ffmpeg_dir,
+            "ffmpeg_location": self.ffmpeg_path,
             "logger": SilentYDLLogger(),
             "socket_timeout": 30,
             "retries": 20,
@@ -406,7 +454,7 @@ class MediaDownloader:
             with yt_dlp.YoutubeDL(fallback_opts) as ydl:
                 ydl.download([url_or_path])
         except Exception as fb_err:
-            print(f"[MediaDownloader] Progressive stream fallback notice ({fb_err}). Retrying with best available format...")
+            print(f"[MediaDownloader] Primary stream fallback notice ({fb_err}). Retrying with best available format...")
             fallback_opts["format"] = "bestvideo[height<=720]+bestaudio/best"
             with yt_dlp.YoutubeDL(fallback_opts) as ydl:
                 ydl.download([url_or_path])
@@ -616,7 +664,8 @@ class MediaDownloader:
             "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
             "outtmpl": video_output_template,
             "merge_output_format": "mp4",
-            "ffmpeg_location": self.ffmpeg_dir,
+            "abort_on_error": False,
+            "ffmpeg_location": self.ffmpeg_path,
             "logger": SilentYDLLogger(),
             "concurrent_fragment_downloads": 8,
             "socket_timeout": 30,
