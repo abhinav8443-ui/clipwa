@@ -1381,6 +1381,7 @@ class YouTubeShortsUploader:
         scheduled: bool = True,
         max_per_day: int = 4,
         dry_run: bool = False,
+        auto_delete: bool = True,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
@@ -1600,47 +1601,51 @@ class YouTubeShortsUploader:
                             clip_id=clip.get("clip_id", idx),
                         )
 
-                    # Automatic immediate file cleanup upon confirmed successful upload/schedule
+                    # File cleanup upon confirmed successful upload/schedule (if auto_delete=True)
                     if res.get("status") in ("scheduled", "uploaded") and res.get("video_url"):
-                        file_name = clip.get("file_name") or (os.path.basename(file_path) if file_path else "")
-                        # 1. Immediately delete rendered .mp4 file
-                        if file_path and os.path.exists(file_path):
-                            try:
-                                os.remove(file_path)
-                                print(f"[YouTubeUploader] 🗑️ Cleaned up local file: {os.path.basename(file_path)}")
-                            except Exception as ex:
-                                print(f"[YouTubeUploader] Warning deleting local file {file_path}: {ex}")
+                        if auto_delete:
+                            file_name = clip.get("file_name") or (os.path.basename(file_path) if file_path else "")
+                            # 1. Immediately delete rendered .mp4 file
+                            if file_path and os.path.exists(file_path):
+                                try:
+                                    os.remove(file_path)
+                                    print(f"[YouTubeUploader] 🗑️ Cleaned up local file: {os.path.basename(file_path)}")
+                                except Exception as ex:
+                                    print(f"[YouTubeUploader] Warning deleting local file {file_path}: {ex}")
 
-                        if file_name and (self.output_dir / file_name).exists():
-                            try:
-                                (self.output_dir / file_name).unlink(missing_ok=True)
-                            except Exception:
-                                pass
+                            if file_name and (self.output_dir / file_name).exists():
+                                try:
+                                    (self.output_dir / file_name).unlink(missing_ok=True)
+                                except Exception:
+                                    pass
 
-                        # 2. Also delete any matching raw section video, extracted .wav audio, and .ass subtitle files
-                        if self.temp_dir and self.temp_dir.exists():
-                            stem = Path(file_name).stem if file_name else ""
-                            clip_id = clip.get("clip_id", idx)
-                            patterns = [
-                                f"{stem}.*",
-                                f"clip_{clip_id}_*.*",
-                                f"raw_section_{clip_id}.*",
-                                f"raw_section_*_{clip_id}.*",
-                                f"clip_audio_{clip_id}.*",
-                            ]
-                            for pat in patterns:
-                                for tf in self.temp_dir.glob(pat):
-                                    try:
-                                        tf.unlink(missing_ok=True)
-                                    except Exception:
-                                        pass
+                            # 2. Also delete any matching raw section video, extracted .wav audio, and .ass subtitle files
+                            if self.temp_dir and self.temp_dir.exists():
+                                stem = Path(file_name).stem if file_name else ""
+                                clip_id = clip.get("clip_id", idx)
+                                patterns = [
+                                    f"{stem}.*",
+                                    f"clip_{clip_id}_*.*",
+                                    f"raw_section_{clip_id}.*",
+                                    f"raw_section_*_{clip_id}.*",
+                                    f"clip_audio_{clip_id}.*",
+                                ]
+                                for pat in patterns:
+                                    for tf in self.temp_dir.glob(pat):
+                                        try:
+                                            tf.unlink(missing_ok=True)
+                                        except Exception:
+                                            pass
 
-                        # 3. Update clip metadata
-                        status_label = "Scheduled & Deleted Locally" if scheduled else "Uploaded & Deleted Locally"
+                            status_label = "Scheduled & Deleted Locally" if scheduled else "Uploaded & Deleted Locally"
+                            clip["file_deleted"] = True
+                        else:
+                            status_label = "Scheduled (Pending Instagram)" if scheduled else "Uploaded (Pending Instagram)"
+                            clip["file_deleted"] = False
+
                         clip["youtube_status"] = status_label
-                        clip["file_deleted"] = True
                         clip["status"] = status_label
-                        res["file_deleted"] = True
+                        res["file_deleted"] = clip.get("file_deleted", False)
                         self._sync_summary_clip(clip)
                 except DailyUploadLimitError as limit_err:
                     print(f"\n[YouTubeUploader] ⚠️ {limit_err}")
@@ -1893,6 +1898,7 @@ class YouTubeShortsUploader:
         scheduled: bool = True,
         max_per_day: int = 4,
         dry_run: bool = False,
+        auto_delete: bool = True,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
@@ -1924,5 +1930,6 @@ class YouTubeShortsUploader:
             scheduled=scheduled,
             max_per_day=max_per_day,
             dry_run=dry_run,
+            auto_delete=auto_delete,
             progress_callback=progress_callback,
         )

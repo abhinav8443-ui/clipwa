@@ -27,6 +27,7 @@ from .pipeline import ClipwaPipeline
 from .subtitle_generator import SubtitleGenerator
 from .transcriber import LocalTranscriber
 from .uploader import YouTubeShortsUploader
+from .insta_uploader import InstagramReelsUploader
 from .video_editor import VideoEditor
 
 console = Console()
@@ -45,6 +46,67 @@ def print_banner():
         "[dim]Powered by yt-dlp + faster-whisper + Gemini 2.5 Flash + MediaPipe + pysubs2 + FFmpeg[/dim]"
     )
     console.print(Panel(banner_text, border_style="cyan", expand=False))
+
+
+def _format_yt_status(clip: dict) -> str:
+    res = clip.get("upload_result") or {}
+    yt_st = clip.get("youtube_status") or res.get("status") or ""
+    slot_data = res.get("scheduled_slot")
+    if isinstance(slot_data, dict):
+        slot_label = slot_data.get("slot_label") or slot_data.get("slot_name") or res.get("scheduled_for")
+    else:
+        slot_label = str(slot_data) if slot_data else res.get("scheduled_for")
+
+    if res.get("status") == "scheduled" or "Scheduled" in str(yt_st):
+        return f"[green]Scheduled: {slot_label}[/green]" if slot_label else f"[green]{yt_st}[/green]"
+    elif res.get("status") == "uploaded" or "Uploaded" in str(yt_st):
+        pub_url = res.get("video_url") or res.get("url")
+        return f"[green]Uploaded: {pub_url}[/green]" if pub_url else f"[green]{yt_st}[/green]"
+    elif res.get("status") == "queued_daily_limit":
+        return "[yellow]Queued (Daily Cap)[/yellow]"
+    elif res.get("status") == "dry_run_success":
+        return f"[cyan]Dry Run OK ({slot_label or 'Simulated'})[/cyan]"
+    elif res.get("error"):
+        return f"[red]Error: {res.get('error')}[/red]"
+    elif yt_st and yt_st not in ("Skipped", "Pending"):
+        return f"[cyan]{yt_st}[/cyan]"
+    elif yt_st == "Pending":
+        return "[yellow]Pending[/yellow]"
+    return "[dim]Skipped[/dim]"
+
+
+def _format_ig_status(clip: dict) -> str:
+    res = clip.get("instagram_result") or {}
+    ig_st = clip.get("instagram_status") or res.get("status") or ""
+    slot_data = res.get("scheduled_slot")
+    if isinstance(slot_data, dict):
+        slot_label = slot_data.get("slot_label") or slot_data.get("slot_name") or res.get("scheduled_for")
+    else:
+        slot_label = str(slot_data) if slot_data else res.get("scheduled_for")
+
+    if res.get("status") in ("scheduled", "shared", "uploaded") or any(k in str(ig_st) for k in ("Scheduled", "Shared", "Uploaded")):
+        if slot_label and "Scheduled" in str(ig_st):
+            return f"[magenta]Scheduled: {slot_label}[/magenta]"
+        return f"[magenta]{ig_st}[/magenta]"
+    elif res.get("status") == "queued_daily_limit":
+        return "[yellow]Queued (Daily Cap)[/yellow]"
+    elif res.get("status") == "dry_run_success":
+        return "[cyan]Dry Run OK[/cyan]"
+    elif res.get("error"):
+        return f"[red]Error: {res.get('error')}[/red]"
+    elif ig_st and ig_st not in ("Skipped", "Pending"):
+        return f"[cyan]{ig_st}[/cyan]"
+    elif ig_st == "Pending":
+        return "[yellow]Pending[/yellow]"
+    return "[dim]Skipped[/dim]"
+
+
+def _format_local_file(clip: dict) -> str:
+    is_del = clip.get("file_deleted") or clip.get("local_file_deleted")
+    fpath = clip.get("file_path")
+    if is_del or not fpath or not os.path.exists(fpath):
+        return "[dim]Cleaned up[/dim]"
+    return Path(fpath).name
 
 
 @click.group()
@@ -74,9 +136,16 @@ def cli():
 @click.option("--provider", default="gemini", help="LLM Provider: gemini, groq, ollama, heuristic.")
 @click.option("--whisper-model", default="tiny", help="Whisper model: tiny, base, small, medium.")
 @click.option(
+    "--platforms",
+    "-P",
+    type=click.Choice(["all", "youtube", "insta"], case_sensitive=False),
+    default="all",
+    help="Target upload platforms: all, youtube, or insta (default: all).",
+)
+@click.option(
     "--upload/--no-upload",
     default=True,
-    help="Upload generated shorts to YouTube (default: True).",
+    help="Upload generated shorts to YouTube/Instagram (default: True).",
 )
 @click.option(
     "--privacy",
@@ -85,7 +154,7 @@ def cli():
     default="public",
     help="YouTube Shorts privacy status (default: public).",
 )
-@click.option("--dry-run-upload", is_flag=True, default=False, help="Test YouTube upload flow without publishing.")
+@click.option("--dry-run-upload", is_flag=True, default=False, help="Test upload flow without publishing.")
 @click.option(
     "--schedule/--immediate",
     default=True,
@@ -107,17 +176,18 @@ def process(
     words_per_line,
     provider,
     whisper_model,
+    platforms,
     upload,
     privacy,
     dry_run_upload,
     schedule,
     max_per_day,
 ):
-    """Run full automated pipeline from URL/file to finished YouTube Shorts."""
+    """Run full automated pipeline from URL/file to finished YouTube Shorts & Instagram Reels."""
     print_banner()
 
     console.print(f"[bold green]Target:[/bold green] {url_or_file}")
-    console.print(f"[bold cyan]Settings:[/bold cyan] {max_clips} clips ({min_duration}-{max_duration}s) | Layout: {layout} | Theme: {theme} | LLM: {provider}")
+    console.print(f"[bold cyan]Settings:[/bold cyan] {max_clips} clips ({min_duration}-{max_duration}s) | Layout: {layout} | Theme: {theme} | Platforms: {platforms.upper()} | LLM: {provider}")
 
     pipeline = ClipwaPipeline(
         llm_provider=provider,
@@ -152,23 +222,25 @@ def process(
                 if pct is not None:
                     progress.update(task, completed=pct, description=f"{msg}{speed_str}")
             elif stage == "discovery":
-                progress.update(task, stage="1/4 Discovery", description=msg)
+                progress.update(task, stage="1/5 Discovery", description=msg)
             elif stage == "transcribe":
-                progress.update(task, stage="1/4 Transcribe", completed=10, description=msg)
+                progress.update(task, stage="1/5 Transcribe", completed=10, description=msg)
             elif stage == "ai_brain":
-                progress.update(task, stage="2/4 AI Brain", completed=40, description=msg)
+                progress.update(task, stage="2/5 AI Brain", completed=35, description=msg)
             elif stage == "clip_download":
                 c_idx = event.get("clip_index", 1)
                 t_clips = event.get("total_clips", 1)
-                progress.update(task, stage=f"3/4 Download {c_idx}/{t_clips}", completed=15, description=msg)
+                progress.update(task, stage=f"3/5 Download {c_idx}/{t_clips}", completed=15, description=msg)
             elif stage == "clip_transcribe":
-                progress.update(task, stage="3/4 Word Align", completed=60, description=msg)
+                progress.update(task, stage="3/5 Word Align", completed=55, description=msg)
             elif stage == "render_clip":
                 c_idx = event.get("clip_index", 1)
                 t_clips = event.get("total_clips", 1)
-                progress.update(task, stage=f"4/4 Render {c_idx}/{t_clips}", completed=80, description=msg)
+                progress.update(task, stage=f"4/5 Render {c_idx}/{t_clips}", completed=75, description=msg)
             elif stage == "upload_short":
-                progress.update(task, stage="5/5 YouTube", completed=95, description=msg)
+                progress.update(task, stage="5/5 YouTube", completed=90, description=msg)
+            elif stage == "upload_insta":
+                progress.update(task, stage="5/5 Instagram", completed=95, description=msg)
             elif stage == "finished":
                 progress.update(task, stage="Finished", completed=100, description=msg)
 
@@ -180,6 +252,7 @@ def process(
             layout_mode=layout,
             caption_theme=theme,
             words_per_line=words_per_line,
+            platforms=platforms,
             upload_to_youtube=upload,
             youtube_privacy=privacy,
             scheduled=schedule,
@@ -191,45 +264,26 @@ def process(
     console.print("\n[bold green]Pipeline Execution Completed Successfully![/bold green]\n")
 
     # Display results table
-    table = Table(title="Generated YouTube Shorts", border_style="cyan")
+    table = Table(title="Generated Shorts & Reels", border_style="cyan")
     table.add_column("#", justify="center", style="bold cyan")
-    table.add_column("Title", style="bold white")
-    table.add_column("Time Window", justify="center")
+    table.add_column("Upgraded Viral Title", style="bold white")
+    table.add_column("Duration", justify="center")
     table.add_column("Virality", justify="center", style="bold yellow")
-    table.add_column("File Path", style="dim")
     table.add_column("YouTube Status", style="green")
+    table.add_column("Instagram Status", style="magenta")
+    table.add_column("Local File", style="dim")
 
     for clip in result.get("clips", []):
-        up_status = "Skipped"
-        if clip.get("upload_result"):
-            res = clip["upload_result"]
-            pub_url = res.get("video_url") or res.get("url")
-            slot_data = res.get("scheduled_slot")
-            if isinstance(slot_data, dict):
-                slot_time = slot_data.get("slot_label") or slot_data.get("slot_name") or res.get("scheduled_for")
-            else:
-                slot_time = str(slot_data) if slot_data else res.get("scheduled_for")
-            if res.get("status") in ("uploaded", "scheduled"):
-                clean_tag = " [dim](Local file cleaned)[/dim]" if (clip.get("file_deleted") or clip.get("local_file_deleted")) else ""
-                if slot_time:
-                    up_status = f"[green]Scheduled: {slot_time}[/green]{clean_tag}"
-                else:
-                    up_status = f"[green]Published: {pub_url}[/green]{clean_tag}"
-            elif res.get("status") == "queued_daily_limit":
-                up_status = "[yellow]Queued (Daily Limit Reached - Saved in output/)[/yellow]"
-            elif res.get("status") == "dry_run_success":
-                up_status = "[cyan]Dry Run OK[/cyan]"
-            else:
-                up_status = f"[red]Error: {res.get('error')}[/red]"
-
-        file_disp = str(clip["file_path"]) if not (clip.get("file_deleted") or clip.get("local_file_deleted")) else "[dim]Cleaned up (Uploaded/Scheduled)[/dim]"
+        dur_val = clip.get("duration", 0)
+        dur_str = f"{dur_val:.1f}s" if isinstance(dur_val, (int, float)) else str(dur_val)
         table.add_row(
-            str(clip["clip_id"]),
-            clip["youtube_title"],
-            f"{clip['start_time']}s - {clip['end_time']}s ({clip['duration']}s)",
-            f"{clip['virality_score']}%",
-            file_disp,
-            up_status,
+            str(clip.get("clip_id", 1)),
+            str(clip.get("youtube_title", "Viral Short")),
+            dur_str,
+            f"{clip.get('virality_score', 85)}%",
+            _format_yt_status(clip),
+            _format_ig_status(clip),
+            _format_local_file(clip),
         )
 
     console.print(table)
@@ -392,7 +446,29 @@ def switch_channel_cmd(timeout):
         console.print("[bold red]❌ Channel switch was not completed or timed out.[/bold red]")
 
 
+@cli.command(name="login-insta")
+@click.option("--timeout", default=300, help="Max seconds to wait for Instagram login.")
+def login_insta_cmd(timeout):
+    """Sign in to your Instagram account once via persistent browser."""
+    print_banner()
+    uploader = InstagramReelsUploader()
+    console.print(f"[cyan]Opening persistent browser for Instagram login (up to {timeout}s)...[/cyan]")
+    console.print("[dim]Please complete login or 2FA in the opened browser window.[/dim]")
+    success = uploader.login_insta(timeout_sec=timeout)
+    if success:
+        console.print("[bold green]✅ Instagram login saved and verified permanently![/bold green]")
+    else:
+        console.print("[bold red]❌ Instagram login was not completed or timed out.[/bold red]")
+
+
 @cli.command(name="upload-existing")
+@click.option(
+    "--platforms",
+    "-P",
+    type=click.Choice(["all", "youtube", "insta"], case_sensitive=False),
+    default="all",
+    help="Target upload platforms: all, youtube, or insta (default: all).",
+)
 @click.option(
     "--privacy",
     "-p",
@@ -415,18 +491,18 @@ def switch_channel_cmd(timeout):
     type=click.IntRange(1, 4),
     help="Maximum scheduled Shorts per day (default: 4).",
 )
-def upload_existing(privacy, summary, dry_run, no_title_upgrade, force, schedule, max_per_day):
-    """Upload previously generated clips from output/ directly to YouTube Shorts."""
+def upload_existing(platforms, privacy, summary, dry_run, no_title_upgrade, force, schedule, max_per_day):
+    """Upload previously generated clips from output/ to YouTube Shorts and/or Instagram Reels."""
     print_banner()
     pipeline = ClipwaPipeline()
 
     mode_str = f"Scheduled Mode (Max {max_per_day}/day)" if schedule else f"Immediate Mode ({privacy.upper()})"
-    console.print(f"[bold cyan]Uploading existing Shorts from output directory [{mode_str}]...[/bold cyan]")
+    console.print(f"[bold cyan]Uploading existing clips ({platforms.upper()}) from output directory [{mode_str}]...[/bold cyan]")
 
     def on_progress(stage, message, extra=None):
         if stage in ("upgrade_titles", "start_upload", "uploading_clip", "skip_clip", "finished"):
             console.print(f"[cyan]•[/cyan] {message}")
-        elif stage == "upload_progress":
+        elif stage in ("upload_short", "upload_insta", "upload_progress"):
             console.print(f"[yellow]•[/yellow] {message}")
         elif stage == "upload_error":
             console.print(f"[bold red]✗[/bold red] {message}")
@@ -434,6 +510,7 @@ def upload_existing(privacy, summary, dry_run, no_title_upgrade, force, schedule
     try:
         updated_clips = pipeline.upload_existing_clips(
             summary_path=summary,
+            platforms=platforms,
             privacy_status=privacy,
             scheduled=schedule,
             max_per_day=max_per_day,
@@ -443,43 +520,31 @@ def upload_existing(privacy, summary, dry_run, no_title_upgrade, force, schedule
             progress_callback=on_progress,
         )
 
-        table = Table(title="YouTube Shorts Upload Status", show_header=True, header_style="bold magenta")
+        table = Table(title="Shorts & Reels Dual Upload Status", show_header=True, header_style="bold magenta")
         table.add_column("#", style="dim", width=4)
-        table.add_column("Upgraded Viral Title", style="bold white", width=36)
+        table.add_column("Upgraded Viral Title", style="bold white", width=34)
         table.add_column("Duration", justify="right", width=10)
         table.add_column("Virality", justify="center", width=10)
-        table.add_column("YouTube Status", style="green", width=34)
+        table.add_column("YouTube Status", style="green", width=32)
+        table.add_column("Instagram Status", style="magenta", width=32)
+        table.add_column("Local File", style="dim", width=22)
 
         for clip in updated_clips:
-            res = clip.get("upload_result") or {}
-            slot_data = res.get("scheduled_slot")
-            if isinstance(slot_data, dict):
-                slot_label = slot_data.get("slot_label") or slot_data.get("slot_name") or res.get("scheduled_for")
-            else:
-                slot_label = str(slot_data) if slot_data else res.get("scheduled_for")
-
-            if res.get("status") == "scheduled" or clip.get("youtube_status") == "Scheduled & Deleted Locally":
-                status_disp = f"Scheduled: {slot_label}" if slot_label else "Scheduled & Deleted Locally"
-            elif res.get("status") == "uploaded":
-                status_disp = res.get("video_url") or "Uploaded"
-            elif res.get("status") == "queued_daily_limit":
-                status_disp = "Queued (Daily Cap Reached)"
-            elif res.get("status") == "dry_run_success":
-                status_disp = f"Dry Run OK ({slot_label or 'Simulated'})"
-            else:
-                status_disp = res.get("error") or clip.get("youtube_status") or "Skipped"
-
+            dur_val = clip.get("duration", 0)
+            dur_str = f"{dur_val:.1f}s" if isinstance(dur_val, (int, float)) else str(dur_val)
             table.add_row(
-                str(clip["clip_id"]),
+                str(clip.get("clip_id", 1)),
                 clip.get("youtube_title", ""),
-                f"{clip.get('duration', 0):.1f}s",
+                dur_str,
                 f"{clip.get('virality_score', 85)}%",
-                status_disp,
+                _format_yt_status(clip),
+                _format_ig_status(clip),
+                _format_local_file(clip),
             )
 
         console.print("\n")
         console.print(table)
-        console.print("\n[bold green]✅ All existing clips processed successfully![/bold green]")
+        console.print(f"\n[bold green]✅ All existing clips processed across {platforms.upper()} successfully![/bold green]")
     except Exception as e:
         console.print(f"[bold red]Error uploading existing clips:[/bold red] {e}")
 

@@ -12,6 +12,7 @@ from .ai_brain import ViralMomentDetector
 from .video_editor import VideoEditor
 from .subtitle_generator import SubtitleGenerator
 from .uploader import YouTubeShortsUploader
+from .insta_uploader import InstagramReelsUploader
 from .pipeline import ClipwaPipeline
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "VideoEditor",
     "SubtitleGenerator",
     "YouTubeShortsUploader",
+    "InstagramReelsUploader",
     "ClipwaPipeline",
 ]

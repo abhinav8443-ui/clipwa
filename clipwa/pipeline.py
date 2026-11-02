@@ -16,6 +16,7 @@ from .downloader import MediaDownloader
 from .subtitle_generator import SubtitleGenerator
 from .transcriber import LocalTranscriber
 from .uploader import YouTubeShortsUploader
+from .insta_uploader import InstagramReelsUploader
 from .video_editor import VideoEditor
 
 
@@ -44,6 +45,11 @@ class ClipwaPipeline:
         )
         self.editor = VideoEditor(temp_dir=self.temp_dir, output_dir=self.output_dir)
         self.uploader = YouTubeShortsUploader()
+        self.insta_uploader = InstagramReelsUploader(
+            user_data_dir=Config.BASE_DIR / "youtube_auth_profile",
+            output_dir=self.output_dir,
+            temp_dir=self.temp_dir,
+        )
 
     def process_video(
         self,
@@ -59,6 +65,7 @@ class ClipwaPipeline:
         scheduled: bool = True,
         max_per_day: int = 4,
         dry_run_upload: bool = False,
+        platforms: str = "all",
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """
@@ -262,32 +269,63 @@ class ClipwaPipeline:
                 "youtube_description": moment.get("youtube_description", "#Shorts"),
                 "tags": moment.get("tags", ["shorts", "viral"]),
                 "upload_result": None,
+                "instagram_result": None,
+                "youtube_status": "Pending",
+                "instagram_status": "Pending",
+                "status": "Rendered",
+                "file_deleted": False,
             }
             processed_clips.append(clip_record)
 
-        # Batch YouTube Upload in persistent browser session if requested
+        # Batch Upload to selected platforms (YouTube Shorts and/or Instagram Reels)
         if upload_to_youtube and processed_clips:
-            notify("upload_short", f"Uploading {len(processed_clips)} clips to YouTube ({youtube_privacy})...")
-            try:
-                def upload_cb(d: Dict[str, Any]) -> None:
-                    stg = d.get("stage", "upload_progress")
-                    msg = d.get("message", "Uploading...")
-                    notify(stg, msg, d)
+            yt_needed = platforms in ("all", "youtube")
+            ig_needed = platforms in ("all", "insta")
 
-                self.uploader.upload_multiple(
-                    clips=processed_clips,
-                    privacy_status=youtube_privacy,
-                    scheduled=scheduled,
-                    max_per_day=max_per_day,
-                    dry_run=dry_run_upload,
-                    progress_callback=upload_cb,
-                )
-            except Exception as e:
-                notify("upload_error", f"YouTube upload failed: {e}")
+            # 1. YouTube Batch Upload
+            if yt_needed:
+                notify("upload_short", f"Uploading {len(processed_clips)} clips to YouTube Shorts ({youtube_privacy})...")
+                try:
+                    def upload_cb(d: Dict[str, Any]) -> None:
+                        stg = d.get("stage", "upload_progress")
+                        msg = d.get("message", "Uploading to YouTube...")
+                        notify(stg, msg, d)
 
-            # Trigger immediate local file & temp cleanup for every successfully published clip
+                    self.uploader.upload_multiple(
+                        clips=processed_clips,
+                        privacy_status=youtube_privacy,
+                        scheduled=scheduled,
+                        max_per_day=max_per_day,
+                        dry_run=dry_run_upload,
+                        auto_delete=(not ig_needed),  # Delete after YouTube only if Instagram is not needed
+                        progress_callback=upload_cb,
+                    )
+                except Exception as e:
+                    notify("upload_error", f"YouTube upload notice: {e}")
+
+            # 2. Instagram Reels Batch Upload (Sequential - after YouTube context has closed cleanly)
+            if ig_needed:
+                notify("upload_insta", f"Uploading {len(processed_clips)} clips to Instagram Reels...")
+                try:
+                    def insta_cb(d: Dict[str, Any]) -> None:
+                        stg = d.get("stage", "upload_progress")
+                        msg = d.get("message", "Uploading to Instagram...")
+                        notify(stg, msg, d)
+
+                    self.insta_uploader.upload_multiple_reels(
+                        clips=processed_clips,
+                        scheduled=scheduled,
+                        max_per_day=max_per_day,
+                        dry_run=dry_run_upload,
+                        auto_delete=False,
+                        progress_callback=insta_cb,
+                    )
+                except Exception as e:
+                    notify("upload_error", f"Instagram upload notice: {e}")
+
+            # 3. Clean up local files ONLY after all requested platforms have completed
             for clip_rec in processed_clips:
-                self.cleanup_uploaded_clip(clip_rec)
+                self.cleanup_uploaded_clip(clip_rec, platforms=platforms)
 
         results["clips"] = processed_clips
         results["status"] = "completed"
@@ -304,16 +342,33 @@ class ClipwaPipeline:
         notify("finished", f"Pipeline complete! {len(processed_clips)} Shorts generated in {results['elapsed_seconds']}s.")
         return results
 
-    def cleanup_uploaded_clip(self, clip_record: Dict[str, Any]) -> bool:
+    def cleanup_uploaded_clip(self, clip_record: Dict[str, Any], platforms: str = "all") -> bool:
         """
         Deletes local .mp4 and associated temporary artifacts for a clip that was successfully uploaded or scheduled.
-        Updates the clip record status to 'Uploaded & Deleted Locally' or 'Scheduled & Deleted Locally'.
+        When platforms='all', deletes ONLY AFTER BOTH YouTube and Instagram have completed!
+        Updates clip record statuses to 'Uploaded & Deleted Locally' or 'Scheduled & Deleted Locally'.
         """
-        upload_res = clip_record.get("upload_result") or {}
-        st = upload_res.get("status")
-        if st not in ("uploaded", "scheduled"):
-            if clip_record.get("youtube_status") in ("Scheduled & Deleted Locally", "Uploaded & Deleted Locally"):
-                return True
+        youtube_needed = platforms in ("all", "youtube")
+        insta_needed = platforms in ("all", "insta")
+
+        yt_res = clip_record.get("upload_result") or {}
+        yt_st = yt_res.get("status")
+        yt_status = str(clip_record.get("youtube_status") or "")
+        yt_done = (yt_st in ("uploaded", "scheduled")) or ("Scheduled" in yt_status) or ("Uploaded" in yt_status)
+
+        ig_res = clip_record.get("instagram_result") or {}
+        ig_st = ig_res.get("status")
+        ig_status = str(clip_record.get("instagram_status") or "")
+        ig_done = (ig_st in ("uploaded", "scheduled", "shared")) or ("Scheduled" in ig_status) or ("Shared" in ig_status) or ("Uploaded" in ig_status)
+
+        # Ready to delete only if all requested platforms have succeeded
+        ready_to_delete = True
+        if youtube_needed and not yt_done:
+            ready_to_delete = False
+        if insta_needed and not ig_done:
+            ready_to_delete = False
+
+        if not ready_to_delete:
             return False
 
         file_path_str = clip_record.get("file_path") or ""
@@ -354,12 +409,23 @@ class ClipwaPipeline:
                         pass
 
         # 3. Update record status
-        final_status = "Scheduled & Deleted Locally" if st == "scheduled" else "Uploaded & Deleted Locally"
-        clip_record["youtube_status"] = final_status
         clip_record["file_deleted"] = True
-        clip_record["status"] = final_status
-        upload_res["file_deleted"] = True
-        upload_res["local_file_cleaned"] = True
+
+        if yt_done:
+            yt_final = "Scheduled & Deleted Locally" if (yt_st == "scheduled" or "Scheduled" in yt_status) else "Uploaded & Deleted Locally"
+            clip_record["youtube_status"] = yt_final
+            yt_res["file_deleted"] = True
+            yt_res["local_file_cleaned"] = True
+            clip_record["upload_result"] = yt_res
+
+        if ig_done:
+            ig_final = "Scheduled & Deleted Locally" if (ig_st == "scheduled" or "Scheduled" in ig_status) else "Shared & Deleted Locally"
+            clip_record["instagram_status"] = ig_final
+            ig_res["file_deleted"] = True
+            ig_res["local_file_cleaned"] = True
+            clip_record["instagram_result"] = ig_res
+
+        clip_record["status"] = clip_record.get("youtube_status") or clip_record.get("instagram_status") or "Completed & Deleted Locally"
 
         # Sync with pipeline_summary.json
         summary_path = self.output_dir / "pipeline_summary.json"
@@ -372,10 +438,12 @@ class ClipwaPipeline:
                     if (c.get("clip_id") == clip_record.get("clip_id")) or (
                         c.get("file_name") and c.get("file_name") == clip_record.get("file_name")
                     ):
-                        c["youtube_status"] = final_status
+                        c["youtube_status"] = clip_record.get("youtube_status")
+                        c["instagram_status"] = clip_record.get("instagram_status")
                         c["file_deleted"] = True
-                        c["status"] = final_status
-                        c["upload_result"] = upload_res
+                        c["status"] = clip_record["status"]
+                        c["upload_result"] = yt_res
+                        c["instagram_result"] = ig_res
                         break
                 atomic_write_json(summary_path, data)
             except Exception:
@@ -386,6 +454,7 @@ class ClipwaPipeline:
     def upload_existing_clips(
         self,
         summary_path: Optional[str] = None,
+        platforms: str = "all",
         privacy_status: str = "public",
         scheduled: bool = True,
         max_per_day: int = 4,
@@ -396,9 +465,9 @@ class ClipwaPipeline:
     ) -> List[Dict[str, Any]]:
         """
         Uploads clips that were already generated in the output directory.
-        Strictly reads pipeline_summary.json and only uploads the latest batch of clips
-        whose youtube_status is 'Skipped', 'Queued', or 'Error' and whose .mp4 file still exists.
-        Never globs arbitrary files!
+        Supports dual-platform uploading to YouTube Shorts and Instagram Reels.
+        Strictly reads pipeline_summary.json and only uploads clips whose .mp4 file still exists.
+        Never deletes local .mp4 until BOTH platforms have succeeded (when platforms='all').
         """
         def notify(stage: str, message: str, extra: Optional[Dict[str, Any]] = None, **kwargs) -> None:
             if progress_callback:
@@ -415,21 +484,14 @@ class ClipwaPipeline:
         if not clips:
             raise ValueError(f"No clips found in summary file '{path}'.")
 
-        # Strictly filter for clips whose youtube_status is "Skipped", "Queued", or "Error" (or pending),
-        # not already uploaded/deleted, and whose .mp4 file still exists on disk.
-        clips_to_upload = []
+        youtube_needed = platforms in ("all", "youtube")
+        insta_needed = platforms in ("all", "insta")
+
+        clips_to_upload: List[Dict[str, Any]] = []
         for c in clips:
-            yt_status = c.get("youtube_status") or c.get("status") or "Skipped"
             is_deleted = c.get("file_deleted", False)
-            upload_res = c.get("upload_result") or {}
-            is_uploaded = upload_res.get("status") in ("uploaded", "scheduled") and bool(upload_res.get("video_url") or upload_res.get("scheduled_for"))
 
-            # Skip if already uploaded/scheduled and deleted
-            if not force and (is_deleted or is_uploaded or yt_status in ("Uploaded & Deleted Locally", "Uploaded & Local File Cleaned", "Scheduled & Deleted Locally")):
-                notify("skip_clip", f"Clip already uploaded/scheduled: {c.get('youtube_title')} ({upload_res.get('video_url', 'Scheduled')})")
-                continue
-
-            # Verify that the .mp4 file actually exists on disk
+            # Check local file existence on disk
             f_path = c.get("file_path") or str(self.output_dir / c.get("file_name", ""))
             if not os.path.exists(f_path):
                 alt_path = str(self.output_dir / c.get("file_name", ""))
@@ -440,21 +502,48 @@ class ClipwaPipeline:
                     notify("skip_clip", f"Clip file not found on disk, skipping: {f_path}")
                     continue
 
-            # Only upload clips with eligible status
-            if force or yt_status in ("Skipped", "Queued", "Error") or upload_res.get("status") in ("failed", "queued_daily_limit", None):
-                clips_to_upload.append(c)
+            # Determine YouTube readiness
+            yt_res = c.get("upload_result") or {}
+            yt_status = str(c.get("youtube_status") or c.get("status") or "")
+            yt_done = (
+                not force
+                and (
+                    yt_res.get("status") in ("uploaded", "scheduled")
+                    or "Deleted Locally" in yt_status
+                    or yt_status in ("Scheduled", "Uploaded")
+                )
+            )
+
+            # Determine Instagram readiness
+            ig_res = c.get("instagram_result") or {}
+            ig_status = str(c.get("instagram_status") or "")
+            ig_done = (
+                not force
+                and (
+                    ig_res.get("status") in ("uploaded", "scheduled", "shared")
+                    or "Deleted Locally" in ig_status
+                    or ig_status in ("Scheduled", "Shared", "Uploaded")
+                )
+            )
+
+            # Skip if all requested platforms are already completed
+            needs_yt = youtube_needed and not yt_done
+            needs_ig = insta_needed and not ig_done
+
+            if not force and not needs_yt and not needs_ig:
+                notify("skip_clip", f"Clip already completed for requested platforms: {c.get('youtube_title')}")
+                continue
+
+            clips_to_upload.append(c)
 
         if not clips_to_upload:
             notify("finished", "No pending clips to upload in pipeline_summary.json!")
             return clips
 
-        notify("start_upload", f"Found {len(clips_to_upload)} pending Short(s) from current summary to upload ({privacy_status.upper()})...")
+        notify("start_upload", f"Found {len(clips_to_upload)} pending Short(s) to upload ({platforms.upper()})...")
 
         if upgrade_titles:
             for clip in clips_to_upload:
-                if (clip.get("upload_result") or {}).get("status") in ("uploaded", "scheduled") and not force:
-                    continue
-                # If title is already a strong hook, keep it; otherwise upgrade
                 cur_title = clip.get("youtube_title", "")
                 if not cur_title or len(cur_title) < 10:
                     raw_text = clip.get("youtube_description", "") or clip.get("hook_text", "")
@@ -465,21 +554,59 @@ class ClipwaPipeline:
             msg = d.get("message", "Uploading...")
             notify(stg, msg, d)
 
-        self.uploader.upload_multiple(
-            clips=clips_to_upload,
-            privacy_status=privacy_status,
-            scheduled=scheduled,
-            max_per_day=max_per_day,
-            dry_run=dry_run,
-            progress_callback=upload_cb,
-        )
+        # 1. YouTube Batch Upload (if requested)
+        if youtube_needed:
+            yt_batch = [
+                c for c in clips_to_upload
+                if force or not (
+                    (c.get("upload_result") or {}).get("status") in ("uploaded", "scheduled")
+                    or "Deleted Locally" in str(c.get("youtube_status", ""))
+                )
+            ]
+            if yt_batch:
+                notify("upload_short", f"Uploading {len(yt_batch)} clip(s) to YouTube Shorts...")
+                try:
+                    self.uploader.upload_multiple(
+                        clips=yt_batch,
+                        privacy_status=privacy_status,
+                        scheduled=scheduled,
+                        max_per_day=max_per_day,
+                        dry_run=dry_run,
+                        auto_delete=(not insta_needed),  # only auto-delete if Instagram is not needed
+                        progress_callback=upload_cb,
+                    )
+                except Exception as e:
+                    notify("upload_error", f"YouTube upload notice: {e}")
 
-        # Enforce cleanup for any newly uploaded clips
+        # 2. Instagram Reels Batch Upload (Sequential - runs after YouTube context has cleanly closed)
+        if insta_needed:
+            ig_batch = [
+                c for c in clips_to_upload
+                if force or not (
+                    (c.get("instagram_result") or {}).get("status") in ("uploaded", "scheduled", "shared")
+                    or "Deleted Locally" in str(c.get("instagram_status", ""))
+                )
+            ]
+            if ig_batch:
+                notify("upload_insta", f"Uploading {len(ig_batch)} clip(s) to Instagram Reels...")
+                try:
+                    self.insta_uploader.upload_multiple_reels(
+                        clips=ig_batch,
+                        scheduled=scheduled,
+                        max_per_day=max_per_day,
+                        dry_run=dry_run,
+                        auto_delete=False,
+                        progress_callback=upload_cb,
+                    )
+                except Exception as e:
+                    notify("upload_error", f"Instagram upload notice: {e}")
+
+        # 3. Enforce cleanup ONLY for clips that succeeded on all requested platforms
         for c in clips_to_upload:
-            self.cleanup_uploaded_clip(c)
+            self.cleanup_uploaded_clip(c, platforms=platforms)
 
-        # Update summary file
+        # 4. Save and atomic-write summary file
         atomic_write_json(path, data)
 
-        notify("finished", f"Finished uploading {len(clips_to_upload)} Shorts!")
+        notify("finished", f"Finished processing {len(clips_to_upload)} clip(s) across {platforms.upper()}!")
         return clips

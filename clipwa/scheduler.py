@@ -130,6 +130,7 @@ class ScheduleLedger:
         slot_name: str,
         channel_id: Optional[str] = None,
         clip_id: Optional[int] = None,
+        platform: str = "youtube",
     ) -> None:
         """Record a newly confirmed scheduled video in the persistent ledger."""
         data = self.load()
@@ -141,19 +142,24 @@ class ScheduleLedger:
             "title": title,
             "video_id": video_id,
             "video_url": video_url,
+            "platform": platform,
             "scheduled_date": scheduled_date,
             "scheduled_time": scheduled_time,
             "iso_timestamp": iso_timestamp,
             "slot_name": slot_name,
-            "channel_id": channel_id or "active",
+            "channel_id": channel_id or ("instagram" if platform == "instagram" else "active"),
             "recorded_at": datetime.now().isoformat(),
         }
 
-        # Deduplicate existing entry with matching video_id or matching date+time
+        # Deduplicate existing entry with matching video_id or matching date+time for the same platform
         scheduled_videos = [
             v for v in scheduled_videos
-            if v.get("video_id") != video_id and not (
-                v.get("scheduled_date") == scheduled_date and v.get("scheduled_time") == scheduled_time
+            if not (
+                v.get("video_id") == video_id and v.get("platform", "youtube") == platform
+            ) and not (
+                v.get("scheduled_date") == scheduled_date
+                and v.get("scheduled_time") == scheduled_time
+                and v.get("platform", "youtube") == platform
             )
         ]
         scheduled_videos.append(entry)
@@ -163,12 +169,13 @@ class ScheduleLedger:
         upload_history.append({
             "title": title,
             "video_id": video_id,
+            "platform": platform,
             "uploaded_at": datetime.now().isoformat(),
         })
         data["upload_history"] = upload_history
 
         self.save(data)
-        print(f"[ScheduleLedger] [SCHEDULED] Ledger updated: '{title}' scheduled for {scheduled_date} @ {scheduled_time} ({slot_name})")
+        print(f"[ScheduleLedger] [SCHEDULED] Ledger updated ({platform}): '{title}' scheduled for {scheduled_date} @ {scheduled_time} ({slot_name})")
 
     def merge_studio_scraped_slots(self, scraped_slots: List[Dict[str, Any]]) -> None:
         """Merge live scheduled shorts found in YouTube Studio into local ledger."""
