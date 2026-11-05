@@ -207,7 +207,7 @@ class ClipwaPipeline:
                     clip_index=clip_num,
                     total_clips=len(moments),
                 )
-                raw_clip_path = str(self.temp_dir / f"raw_section_{clip_num}.mp4")
+                raw_clip_path = str(self.temp_dir / f"clip_video_{clip_num}_{int(clip_st)}_{int(clip_et)}.mp4")
                 actual_clip_path = self.downloader.download_clip_section(
                     url_or_path=url_or_path,
                     start_time=clip_st,
@@ -220,7 +220,7 @@ class ClipwaPipeline:
                 render_et = clip_dur
 
                 # Extract audio for just this 30-60s clip and get exact word timestamps
-                clip_audio = str(self.temp_dir / f"clip_audio_{clip_num}.wav")
+                clip_audio = str(self.temp_dir / f"clip_align_audio_{clip_num}_{int(clip_st)}_{int(clip_et)}.wav")
                 self.downloader.extract_audio(actual_clip_path, clip_audio)
 
                 notify("clip_transcribe", f"Aligning word timestamps for Clip {clip_num}...")
@@ -234,6 +234,13 @@ class ClipwaPipeline:
                     clip_start=0.0,
                     clip_end=clip_dur,
                 )
+
+            # Ensure viral title is strictly clean, valid, and devoid of markdown hashes
+            clean_title = self.ai_brain.clean_and_validate_title(
+                moment.get("youtube_title", ""),
+                fallback_dialogue=moment.get("hook_text", "")
+            )
+            moment["youtube_title"] = clean_title
 
             # Render 9:16 vertical Shorts video with zero-crop face protection + burned subtitles
             out_mp4_name = f"{base_filename}_short.mp4"
@@ -545,9 +552,8 @@ class ClipwaPipeline:
         if upgrade_titles:
             for clip in clips_to_upload:
                 cur_title = clip.get("youtube_title", "")
-                if not cur_title or len(cur_title) < 10:
-                    raw_text = clip.get("youtube_description", "") or clip.get("hook_text", "")
-                    clip["youtube_title"] = self.ai_brain.generate_viral_title(raw_text)
+                raw_text = clip.get("youtube_description", "") or clip.get("hook_text", "")
+                clip["youtube_title"] = self.ai_brain.clean_and_validate_title(cur_title, fallback_dialogue=raw_text)
 
         def upload_cb(d: Dict[str, Any]) -> None:
             stg = d.get("stage", "upload_progress")

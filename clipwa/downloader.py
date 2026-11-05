@@ -90,6 +90,39 @@ class MediaDownloader:
         if self.ffmpeg_dir not in path_parts:
             os.environ["PATH"] = f"{self.ffmpeg_dir}{os.pathsep}{current_path}"
 
+    def _has_valid_video(self, file_path: str) -> bool:
+        """Verify that a media file exists, has size > 1000, and contains a readable video stream with width > 0 and height > 0."""
+        if not file_path or not os.path.exists(file_path):
+            return False
+        try:
+            if os.path.getsize(file_path) < 1000:
+                return False
+        except Exception:
+            return False
+
+        # 1. Check with OpenCV VideoCapture
+        try:
+            cap = cv2.VideoCapture(str(file_path))
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            cap.release()
+            if w > 0 and h > 0 and fps > 0:
+                return True
+        except Exception:
+            pass
+
+        # 2. Check with FFmpeg/FFprobe
+        try:
+            cmd = [self.ffmpeg_path, "-i", str(file_path)]
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+            if "Video:" in p.stderr:
+                return True
+        except Exception:
+            pass
+
+        return False
+
     @staticmethod
     def sanitize_filename(name: str) -> str:
         """Sanitize string for safe filesystem usage."""
@@ -234,7 +267,7 @@ class MediaDownloader:
         if progress_callback:
             progress_callback({"stage": "download_audio", "message": "Downloading audio for Whisper..."})
 
-        audio_output_template = str(self.temp_dir / f"{base_name}_audio.%(ext)s")
+        audio_output_template = str(self.temp_dir / f"discovery_audio_{info['id']}.%(ext)s")
 
         def hook(d: Dict[str, Any]) -> None:
             if progress_callback and d.get("status") == "downloading":
@@ -270,7 +303,7 @@ class MediaDownloader:
             download_info = ydl.extract_info(url_or_path, download=True)
             downloaded_audio = ydl.prepare_filename(download_info)
 
-        wav_path = str(self.temp_dir / f"{base_name}_16k.wav")
+        wav_path = str(self.temp_dir / f"discovery_speech_{info['id']}_16k.wav")
         self.extract_audio(downloaded_audio, wav_path)
         return None, wav_path, info
 
@@ -305,6 +338,27 @@ class MediaDownloader:
                 output_path,
             ]
             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            if self._has_valid_video(output_path):
+                return output_path
+            # If stream copy failed or produced no video, re-encode cleanly
+            cmd = [
+                self.ffmpeg_path,
+                "-y",
+                "-ss",
+                f"{start_time:.3f}",
+                "-i",
+                url_or_path,
+                "-t",
+                f"{dur:.3f}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "superfast",
+                "-c:a",
+                "aac",
+                output_path,
+            ]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             return output_path
 
         def hook(d: Dict[str, Any]) -> None:
@@ -321,13 +375,15 @@ class MediaDownloader:
                 })
 
         # Primary Method: 100% Native Python yt-dlp Fragment/Byte-Range Download
-        # force_keyframes_at_cuts=False ensures yt-dlp uses pure Python DASH fragment downloading
+        # Format selector strictly requires video (never allow audio-only formats!)
+        primary_format = "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080][ext=mp4]/b[vcodec!=none]"
+
         buffer_start = max(0.0, start_time - 2.0)
         buffer_end = end_time + 2.0
         ranges = [(buffer_start, buffer_end)]
         offset = max(0.0, start_time - buffer_start)
 
-        temp_base = str(self.temp_dir / f"raw_section_{int(start_time)}_{int(end_time)}")
+        temp_base = str(self.temp_dir / f"raw_download_{int(start_time)}_{int(end_time)}")
         for old_f in glob.glob(f"{temp_base}*"):
             try:
                 os.remove(old_f)
@@ -339,7 +395,7 @@ class MediaDownloader:
 
         try:
             ydl_opts = {
-                "format": "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[ext=mp4]/b",
+                "format": primary_format,
                 "outtmpl": f"{temp_base}.%(ext)s",
                 "merge_output_format": "mp4",
                 "download_ranges": download_range_func(None, ranges),
@@ -366,7 +422,7 @@ class MediaDownloader:
             if cands:
                 for cand in cands:
                     if cand.endswith((".mp4", ".mkv", ".webm", ".ts")):
-                        if os.path.exists(cand) and os.path.getsize(cand) > 1000:
+                        if self._has_valid_video(cand):
                             downloaded_raw = cand
                             primary_success = True
                             break
@@ -379,7 +435,7 @@ class MediaDownloader:
             print(f"[MediaDownloader] Range download encounter: {e}. Switching to progressive stream fallback...")
             primary_success = False
 
-        if primary_success and downloaded_raw and os.path.exists(downloaded_raw):
+        if primary_success and downloaded_raw and self._has_valid_video(downloaded_raw):
             try:
                 raw_dur = self._get_media_duration(downloaded_raw)
                 if raw_dur > dur + 0.5:
@@ -407,14 +463,14 @@ class MediaDownloader:
                     output_path,
                 ]
                 subprocess.run(trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                if self._has_valid_video(output_path):
                     try:
                         os.remove(downloaded_raw)
                     except Exception:
                         pass
                     return output_path
                 else:
-                    print("[MediaDownloader] Primary cut was empty. Switching to progressive fallback...")
+                    print("[MediaDownloader] Primary trimmed output has no valid video stream. Switching to progressive fallback...")
             except Exception as trim_err:
                 print(f"[MediaDownloader] Primary FFmpeg trim error: {trim_err}. Switching to progressive fallback...")
             finally:
@@ -424,7 +480,13 @@ class MediaDownloader:
                     except Exception:
                         pass
 
-        # Fallback Method: Progressive / DASH stream download with FFmpeg merge
+        # Fallback Method: Progressive MP4 download (format='18/b[ext=mp4]/b[vcodec!=none]') + FFmpeg slice
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+
         fallback_base = str(self.temp_dir / f"fallback_stream_{int(start_time)}_{int(end_time)}")
         for old_f in glob.glob(f"{fallback_base}*"):
             try:
@@ -433,7 +495,7 @@ class MediaDownloader:
                 pass
 
         fallback_opts = {
-            "format": "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[ext=mp4]/b",
+            "format": "18/b[ext=mp4]/b[vcodec!=none]/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080][ext=mp4]/b[vcodec!=none]",
             "outtmpl": f"{fallback_base}.%(ext)s",
             "merge_output_format": "mp4",
             "abort_on_error": False,
@@ -454,8 +516,8 @@ class MediaDownloader:
             with yt_dlp.YoutubeDL(fallback_opts) as ydl:
                 ydl.download([url_or_path])
         except Exception as fb_err:
-            print(f"[MediaDownloader] Primary stream fallback notice ({fb_err}). Retrying with best available format...")
-            fallback_opts["format"] = "bestvideo[height<=720]+bestaudio/best"
+            print(f"[MediaDownloader] Progressive stream fallback notice ({fb_err}). Retrying with best available video format...")
+            fallback_opts["format"] = "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio"
             with yt_dlp.YoutubeDL(fallback_opts) as ydl:
                 ydl.download([url_or_path])
 
@@ -463,11 +525,12 @@ class MediaDownloader:
         downloaded_fb = None
         for cand in fb_cands:
             if cand.endswith((".mp4", ".mkv", ".webm", ".ts")):
-                downloaded_fb = cand
-                break
+                if self._has_valid_video(cand):
+                    downloaded_fb = cand
+                    break
 
         if not downloaded_fb or not os.path.exists(downloaded_fb):
-            raise RuntimeError(f"Failed to download video section for {url_or_path}")
+            raise RuntimeError(f"Failed to download valid video stream for {url_or_path}")
 
         # Local trim with FFmpeg on the local file
         trim_cmd = [
@@ -494,6 +557,9 @@ class MediaDownloader:
             os.remove(downloaded_fb)
         except Exception:
             pass
+
+        if not self._has_valid_video(output_path):
+            raise RuntimeError(f"FFmpeg trim completed but output file '{output_path}' contains no valid video stream.")
 
         return output_path
 

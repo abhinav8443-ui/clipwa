@@ -98,6 +98,43 @@ class ViralMomentDetector:
         self.api_key = api_key or Config.GEMINI_API_KEY
         self.model = model or Config.DEFAULT_GEMINI_MODEL
 
+    def clean_and_validate_title(self, raw_title: Optional[str], fallback_dialogue: str = "") -> str:
+        """
+        Cleans and validates a YouTube Shorts title:
+        1. Strips existing '#Shorts' or '#shorts' tag.
+        2. Strips markdown symbols: '#', '*', '_', '>', '<', '`', '~', '|'.
+        3. Strips excessive whitespace and surrounding quotes.
+        4. Validation check: If cleaned title has fewer than 3 alphabetic characters (e.g. '####', '...', empty),
+           automatically falls back to generating a clean, punchy motivational title from fallback_dialogue keywords.
+        5. Appends ' #Shorts' and ensures length <= 70 characters.
+        """
+        text = str(raw_title or "").strip()
+        # Remove any existing '#shorts' or '#Shorts'
+        text = re.sub(r"#shorts\b", "", text, flags=re.IGNORECASE).strip()
+
+        # Strip markdown symbols and formatting
+        cleaned = re.sub(r"[#*_><`~|]+", " ", text)
+        cleaned = re.sub(r"^\s*>>+\s*", "", cleaned)
+        cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip().strip('"\'“”‘’')
+
+        # Count alphabetic characters
+        alpha_chars = re.findall(r"[a-zA-Z]", cleaned)
+        if len(alpha_chars) < 3:
+            # Fall back to generating from transcript dialogue keywords
+            fallback_title = self._smart_heuristic_title(fallback_dialogue)
+            cleaned_fb = re.sub(r"#shorts\b", "", fallback_title, flags=re.IGNORECASE).strip()
+            cleaned_fb = re.sub(r"[#*_><`~|]+", " ", cleaned_fb)
+            cleaned_fb = re.sub(r"\s+", " ", cleaned_fb).strip().strip('"\'“”‘’')
+            if len(re.findall(r"[a-zA-Z]", cleaned_fb)) >= 3:
+                cleaned = cleaned_fb
+            else:
+                cleaned = "The Mindset That Changes Everything 🔥"
+
+        # Limit base title to 55 chars so with ' #Shorts' it stays under 65 chars
+        cleaned = cleaned[:55].strip()
+        return _sanitize_youtube_text(f"{cleaned} #Shorts")
+
     def detect_moments(
         self,
         transcript_data: Dict[str, Any],
@@ -533,9 +570,7 @@ Transcript:
             clip_segs = [s.get("text", "") for s in segments if s.get("start", 0) >= snapped_st - 0.5 and s.get("end", 0) <= snapped_et + 0.5]
             dialogue = _sanitize_youtube_text(" ".join(clip_segs))
 
-            title = _sanitize_youtube_text(c.get("youtube_title") or self.generate_viral_title(dialogue))
-            if "#Shorts" not in title and "#shorts" not in title:
-                title = f"{title.strip()} #Shorts"
+            title = self.clean_and_validate_title(c.get("youtube_title"), fallback_dialogue=dialogue)
 
             refined_cands.append({
                 "start_time": snapped_st,
@@ -544,7 +579,7 @@ Transcript:
                 "virality_score": int(c.get("virality_score", 90)),
                 "hook_text": _sanitize_youtube_text(str(c.get("hook_text") or dialogue[:80] + "...")),
                 "reason": _sanitize_youtube_text(str(c.get("reason") or "High-impact motivational breakthrough")),
-                "youtube_title": _sanitize_youtube_text(title[:70]),
+                "youtube_title": title,
                 "youtube_description": _sanitize_youtube_text(f"{dialogue[:200]}...\n\n#Shorts #Motivation #Mindset #NeverGiveUp"),
                 "tags": c.get("tags") or ["shorts", "motivation", "mindset", "nevergiveup", "discipline"],
             })
@@ -834,15 +869,13 @@ Transcript:
                 messages=[{"role": "user", "content": prompt}],
             )
             cand = resp.choices[0].message.content.strip().strip('"\'')
-            if "#Shorts" not in cand and "#shorts" not in cand:
-                cand = f"{cand} #Shorts"
-            if len(cand) <= 70:
-                return _sanitize_youtube_text(cand)
+            return self.clean_and_validate_title(cand, fallback_dialogue=clean)
         except Exception:
             pass
 
         # 2. Smart heuristic fallback
-        return _sanitize_youtube_text(self._smart_heuristic_title(clean, context))
+        heuristic_title = self._smart_heuristic_title(clean, context)
+        return self.clean_and_validate_title(heuristic_title, fallback_dialogue=clean)
 
     def rewrite_summary_titles(self, summary_path: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -862,8 +895,6 @@ Transcript:
             clip["youtube_title"] = new_title
 
         atomic_write_json(path, data)
-
-        return clips
 
         return clips
 
@@ -891,15 +922,18 @@ Transcript:
                     st = float(item.get("start_time", 0))
                     et = float(item.get("end_time", st + 45.0))
                     dur = round(et - st, 2)
+                    hook_str = str(item.get("hook_text", ""))
+                    raw_title = str(item.get("youtube_title", ""))
+                    validated_title = self.clean_and_validate_title(raw_title, fallback_dialogue=hook_str)
                     valid_clips.append({
                         "clip_id": idx + 1,
                         "start_time": round(st, 2),
                         "end_time": round(et, 2),
                         "duration": dur,
                         "virality_score": int(item.get("virality_score", 90)),
-                        "hook_text": str(item.get("hook_text", "")),
+                        "hook_text": hook_str,
                         "reason": str(item.get("reason", "Inspirational high-value segment")),
-                        "youtube_title": str(item.get("youtube_title", f"The Mindset Shift #{idx+1} #Shorts")),
+                        "youtube_title": validated_title,
                         "youtube_description": str(item.get("youtube_description", "#Shorts #Motivation")),
                         "tags": item.get("tags", ["shorts", "motivation", "nevergiveup", "discipline"]),
                     })

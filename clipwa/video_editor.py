@@ -252,6 +252,26 @@ class VideoEditor:
         except Exception:
             return True
 
+    def _has_video_stream(self, video_path: str) -> bool:
+        """Check if video file contains at least one valid video stream."""
+        if not video_path or not os.path.exists(video_path):
+            return False
+        try:
+            cap = cv2.VideoCapture(str(video_path))
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            cap.release()
+            if w > 0 and h > 0:
+                return True
+        except Exception:
+            pass
+        try:
+            cmd = [self.ffmpeg_path, "-i", str(video_path)]
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+            return "Video:" in p.stderr
+        except Exception:
+            return False
+
     def render_clip(
         self,
         video_path: str,
@@ -269,6 +289,11 @@ class VideoEditor:
         Upgraded with unsharp mask sharpening, contrast boost, high-bitrate CRF 18 render,
         0.0s Hook SFX, background retention tune, and broadcast audio compression.
         """
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Input video file not found: {video_path}")
+        if not self._has_video_stream(video_path):
+            raise ValueError(f"Input file '{video_path}' does not contain a valid video stream (cannot render [0:v]).")
+
         output_path = str(self.output_dir / output_filename)
         duration = end_time - start_time
 
