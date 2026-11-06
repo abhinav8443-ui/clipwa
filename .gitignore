@@ -7,6 +7,12 @@ __pycache__/
 build/
 dist/
 
+# Audio files & custom tracks
+assets/audio/custom_tracks/
+assets/audio/*.wav
+assets/audio/*.mp3
+assets/audio/*.m4a
+
 # Binaries (>100MB)
 bin/*.exe
 !bin/.gitkeep

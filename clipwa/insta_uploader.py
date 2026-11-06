@@ -15,7 +15,9 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config, atomic_write_json
-from .scheduler import PeakSlotResolver, ScheduleLedger
+from .scheduler import PeakSlotResolver, ScheduleLedger, STUDIO_UPLOAD_SAFETY_CAP
+from .stealth_helpers import human_sleep, human_click, human_type, human_move_mouse_jitter
+import random
 
 from rich.console import Console
 from rich.table import Table
@@ -472,24 +474,25 @@ class InstagramReelsUploader:
             next_btn2.click(force=True)
             page.wait_for_timeout(2500)
 
-        # 8. Fill Caption
+        # 8. Fill Caption with stealth typing
         print(f"[InstagramUploader] Entering caption and hashtags for '{title}'...")
         caption_box = page.locator(
             "div[aria-label*='caption' i][contenteditable='true'], div[aria-label*='Write a caption' i], div[role='textbox']"
         ).first
         caption_box.wait_for(state="visible", timeout=15000)
-        caption_box.click(force=True)
-        page.wait_for_timeout(400)
+        human_sleep(1.0, 1.5)
 
         try:
-            caption_box.fill(full_caption)
-        except Exception:
-            # Fallback to keyboard typing
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            page.keyboard.type(full_caption[:2200])
+            human_type(page, caption_box, full_caption[:2200], clear_first=True, pause_after=2.0)
+            print("[InstagramUploader] Caption and hashtags added with stealth typing.")
+        except Exception as e:
+            print(f"[InstagramUploader] Warning entering caption: {e}")
+            try:
+                caption_box.fill(full_caption[:2200])
+            except Exception:
+                pass
 
-        page.wait_for_timeout(1000)
+        human_sleep(1.0, 2.0)
 
         # 9. Schedule or Share
         is_scheduled = False
@@ -618,22 +621,22 @@ class InstagramReelsUploader:
         self,
         clips: List[Dict[str, Any]],
         scheduled: bool = True,
-        max_per_day: int = 4,
+        max_per_day: int = 2,
         dry_run: bool = False,
         auto_delete: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Uploads multiple vertical clips to Instagram Reels sequentially within the SAME browser session.
-        Respects rolling 24-hour rate limit and peak window scheduling.
+        Respects rolling 24-hour rate limit (4 uploads max) and peak window scheduling.
         """
         ledger = ScheduleLedger(self.output_dir / "schedule_ledger.json")
 
-        # 1. Check Rolling 24-Hour Safety Cap (Max 8 uploads per 24 hours)
+        # 1. Check Rolling 24-Hour Safety Cap (Max 4 uploads per 24 hours)
         recent_uploads = ledger.get_recent_upload_count(hours=24)
-        print(f"\n[InstagramUploader] 📊 24-Hour Rolling Reel Count: {recent_uploads}/8 permitted uploads.")
-        if recent_uploads >= 8:
-            print("[InstagramUploader] 🛑 Safety Cap Reached: 8 uploads already completed in the last 24 hours!")
+        print(f"\n[InstagramUploader] 📊 24-Hour Rolling Reel Count: {recent_uploads}/{STUDIO_UPLOAD_SAFETY_CAP} permitted uploads.")
+        if recent_uploads >= STUDIO_UPLOAD_SAFETY_CAP:
+            print(f"[InstagramUploader] 🛑 Safety Cap Reached: {STUDIO_UPLOAD_SAFETY_CAP} uploads already completed in the last 24 hours!")
             print("[InstagramUploader] 💾 All clips are preserved safely in output/.\n")
             for c in clips:
                 c["instagram_status"] = "Queued for Next Upload Window"
@@ -806,6 +809,15 @@ class InstagramReelsUploader:
                     clip["instagram_result"] = {"error": str(e), "status": "failed"}
                     clip["instagram_status"] = "Error"
                     self._sync_summary_clip(clip)
+
+                # Inter-Clip Cooldown: randomized 15-25 seconds before next Reel
+                if idx < total_clips:
+                    cooldown = random.uniform(15.0, 25.0)
+                    print(f"\n[InstagramUploader] ⏳ Inter-clip stealth cooldown: pausing {cooldown:.1f}s before next Reel...")
+                    human_move_mouse_jitter(page, count=2)
+                    time.sleep(cooldown)
+                else:
+                    human_sleep(2.0, 3.5)
 
             context.close()
 

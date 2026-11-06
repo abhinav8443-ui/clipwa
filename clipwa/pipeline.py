@@ -55,7 +55,7 @@ class ClipwaPipeline:
         try:
             from .setup_custom_tracks import download_and_prepare_custom_tracks
             custom_tracks_dir = Config.BASE_DIR / "assets" / "audio" / "custom_tracks"
-            if not custom_tracks_dir.exists() or len(list(custom_tracks_dir.glob("*.wav"))) < 3:
+            if not custom_tracks_dir.exists() or len(list(custom_tracks_dir.glob("*.wav"))) < 5:
                 download_and_prepare_custom_tracks()
         except Exception:
             pass
@@ -72,7 +72,7 @@ class ClipwaPipeline:
         upload_to_youtube: bool = False,
         youtube_privacy: str = "private",
         scheduled: bool = True,
-        max_per_day: int = 4,
+        max_per_day: int = 2,
         dry_run_upload: bool = False,
         platforms: str = "all",
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -474,7 +474,7 @@ class ClipwaPipeline:
         platforms: str = "all",
         privacy_status: str = "public",
         scheduled: bool = True,
-        max_per_day: int = 4,
+        max_per_day: int = 2,
         upgrade_titles: bool = True,
         force: bool = False,
         dry_run: bool = False,

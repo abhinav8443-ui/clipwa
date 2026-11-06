@@ -22,7 +22,13 @@ class PeakSlotDef:
     time_str: str
 
 
-# 4-Slot Peak Model (Default: 4/day with 4 to 5 hour breathing windows)
+# 2-Slot Daily Peak Model (Default: 2/day with 8-hour daytime gap and 16-hour overnight gap)
+PEAK_SLOTS_2: List[PeakSlotDef] = [
+    PeakSlotDef(12, 30, "Midday Lunch & Global Scroll Spike", "Midday Peak", "12:30 PM"),
+    PeakSlotDef(20, 30, "Prime Nighttime Binge & US/UK Overlap", "Night Peak", "8:30 PM"),
+]
+
+# 4-Slot Peak Model (Optional: 4/day with 4 to 5 hour breathing windows)
 PEAK_SLOTS_4: List[PeakSlotDef] = [
     PeakSlotDef(8, 0, "Morning Motivation Peak", "Morning Peak", "8:00 AM"),
     PeakSlotDef(12, 30, "Midday Lunch Spike", "Midday Peak", "12:30 PM"),
@@ -36,6 +42,9 @@ PEAK_SLOTS_3: List[PeakSlotDef] = [
     PeakSlotDef(14, 0, "Afternoon Focus Spike", "Afternoon Peak", "2:00 PM"),
     PeakSlotDef(20, 0, "Evening Prime Window", "Evening Peak", "8:00 PM"),
 ]
+
+# Rolling 24-hour Studio upload safety cap
+STUDIO_UPLOAD_SAFETY_CAP: int = 4
 
 
 class ScheduleLedger:
@@ -207,25 +216,30 @@ class PeakSlotResolver:
     def __init__(self, ledger: Optional[ScheduleLedger] = None):
         self.ledger = ledger or ScheduleLedger()
 
-    def get_peak_slot_defs(self, max_per_day: int = 4) -> List[PeakSlotDef]:
+    def get_peak_slot_defs(self, max_per_day: int = 2) -> List[PeakSlotDef]:
         """Return slot definitions based on daily posting density."""
-        if max_per_day <= 3:
+        if max_per_day <= 2:
+            return PEAK_SLOTS_2
+        elif max_per_day == 3:
             return PEAK_SLOTS_3
         return PEAK_SLOTS_4
 
     def get_next_available_slots(
         self,
         num_clips: int,
-        max_per_day: int = 4,
+        max_per_day: int = 2,
         extra_occupied_dts: Optional[List[datetime]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Calculates the next available peak slots starting >= 45 minutes from now.
-        Guarantees >= 3.5 hours between shorts and enforces max_per_day per date.
+        Calculates the next available peak slots starting >= 60 minutes from now.
+        Guarantees >= 6.5 hours between shorts on the same day and enforces max_per_day per date.
         """
         now = datetime.now()
-        earliest_dt = now + timedelta(minutes=45)
+        earliest_dt = now + timedelta(minutes=60)
         slot_defs = self.get_peak_slot_defs(max_per_day=max_per_day)
+
+        # Minimum breathing space: >= 6.5 hours (390 mins) for 2/day, 5 hours for 3/day, 3.5 hours for 4/day
+        min_breathing_mins = 390 if max_per_day <= 2 else (300 if max_per_day == 3 else 210)
 
         # Gather all currently occupied scheduled datetimes
         all_occupied: List[datetime] = [
@@ -264,15 +278,15 @@ class PeakSlotResolver:
                     slot.minute,
                 )
 
-                # Rule 1: Never schedule in the past or < 45 min away
+                # Rule 1: Never schedule in the past or < 60 min away
                 if slot_dt < earliest_dt:
                     continue
 
-                # Rule 2: Minimum 3.5 hours (210 minutes) breathing room from any scheduled video
+                # Rule 2: Minimum breathing room (>= 6.5 hours for 2/day) from any scheduled video
                 conflict = False
                 for occ in all_occupied:
                     diff_mins = abs((slot_dt - occ).total_seconds()) / 60.0
-                    if diff_mins < 210:  # 3.5 hours breathing space
+                    if diff_mins < min_breathing_mins:
                         conflict = True
                         break
 

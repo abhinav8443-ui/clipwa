@@ -162,9 +162,9 @@ def cli():
 )
 @click.option(
     "--max-per-day",
-    default=4,
+    default=2,
     type=click.IntRange(1, 4),
-    help="Maximum scheduled Shorts per day (default: 4).",
+    help="Maximum scheduled Shorts per day (default: 2).",
 )
 def process(
     url_or_file,
@@ -487,9 +487,9 @@ def login_insta_cmd(timeout):
 )
 @click.option(
     "--max-per-day",
-    default=4,
+    default=2,
     type=click.IntRange(1, 4),
-    help="Maximum scheduled Shorts per day (default: 4).",
+    help="Maximum scheduled Shorts per day (default: 2).",
 )
 def upload_existing(platforms, privacy, summary, dry_run, no_title_upgrade, force, schedule, max_per_day):
     """Upload previously generated clips from output/ to YouTube Shorts and/or Instagram Reels."""

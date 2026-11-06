@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config, atomic_write_json
-from .scheduler import PeakSlotResolver, ScheduleLedger
+from .scheduler import PeakSlotResolver, ScheduleLedger, STUDIO_UPLOAD_SAFETY_CAP
+from .stealth_helpers import human_sleep, human_click, human_type, human_move_mouse_jitter
+import random
 
 from rich.console import Console
 from rich.table import Table
@@ -745,31 +747,30 @@ class YouTubeShortsUploader:
         create_btn = page.locator('#create-icon, button[aria-label="Create"], ytcp-button#create-icon').first
         try:
             create_btn.wait_for(state="visible", timeout=10000)
-            create_btn.click(timeout=5000)
+            human_click(page, create_btn, min_sleep_after=1.0, max_sleep_after=2.0)
         except Exception:
             # Try clearing any backdrop overlay and force click
             page.keyboard.press("Escape")
-            page.wait_for_timeout(500)
+            human_sleep(0.5, 1.0)
             try:
-                create_btn.click(force=True)
+                human_click(page, create_btn, min_sleep_after=1.0, max_sleep_after=1.5)
             except Exception:
                 upload_btn = page.locator("ytcp-button:has-text('Upload videos'), button:has-text('Upload videos')").first
                 if upload_btn.is_visible():
-                    upload_btn.click(force=True)
+                    human_click(page, upload_btn, min_sleep_after=1.0, max_sleep_after=2.0)
 
-        page.wait_for_timeout(1000)
         upload_item = page.locator(
             "ytcp-text-menu-item:has-text('Upload videos'), #text-item-0, paper-item:has-text('Upload')"
         ).first
         try:
             upload_item.wait_for(state="visible", timeout=10000)
-            upload_item.click(timeout=5000)
+            human_click(page, upload_item, min_sleep_after=1.5, max_sleep_after=2.5)
         except Exception:
             try:
                 upload_item.click(force=True)
+                human_sleep(1.0, 2.0)
             except Exception:
                 pass
-        page.wait_for_timeout(1500)
 
         # 3. Select file using expect_file_chooser or direct input
         file_selected = False
@@ -836,39 +837,41 @@ class YouTubeShortsUploader:
             title_box.wait_for(state="visible", timeout=15000)
         page.wait_for_timeout(1000)
 
-        # Fill Title
+        # Fill Title with stealth typing
+        clean_title = _sanitize_youtube_text(title)[:100]
         try:
-            title_box.click(force=True)
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            clean_title = _sanitize_youtube_text(title)[:100]
-            title_box.fill(clean_title)
+            human_type(page, title_box, clean_title, clear_first=True, pause_after=1.5)
         except Exception as e:
-            print(f"[YouTubeUploader] Warning filling title: {e}")
+            print(f"[YouTubeUploader] Warning stealth typing title: {e}")
+            try:
+                title_box.fill(clean_title)
+            except Exception:
+                pass
 
-        # Fill Description
+        human_sleep(1.0, 2.0)
+
+        # Fill Description with stealth typing
         try:
             desc_box = page.locator("#description-textarea #textbox, #textbox[aria-label*='description' i]").first
             if desc_box.is_visible():
-                desc_box.click(force=True)
-                page.keyboard.press("Control+A")
-                page.keyboard.press("Backspace")
                 clean_tags = [_sanitize_youtube_text(t).strip("#") for t in (tags or []) if t]
                 full_desc = f"{description}\n\n" + " ".join(f"#{t}" for t in clean_tags)
                 clean_desc = _sanitize_youtube_text(full_desc)
-                desc_box.fill(clean_desc)
+                human_type(page, desc_box, clean_desc, clear_first=True, pause_after=2.0)
         except Exception as e:
-            print(f"[YouTubeUploader] Warning filling description: {e}")
+            print(f"[YouTubeUploader] Warning stealth typing description: {e}")
 
-        # Select 'Not Made for Kids' (REQUIRED by YouTube to enable Next button!)
+        # Review pause: pause 3.0s to 5.0s like a human reading details before scrolling down to audience
+        print("[YouTubeUploader] Pausing 3.0s-5.0s like a human reviewing details...")
+        human_sleep(3.0, 5.0)
+
+        # Select 'Not Made for Kids' with human click
         try:
             not_for_kids = page.locator(
                 '[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"], tp-yt-paper-radio-button:has-text("not made for kids")'
             ).first
-            not_for_kids.scroll_into_view_if_needed(timeout=10000)
-            not_for_kids.click(force=True)
+            human_click(page, not_for_kids, min_sleep_after=1.5, max_sleep_after=2.5)
             print("[YouTubeUploader] Selected audience: 'No, it is not made for kids'")
-            page.wait_for_timeout(1000)
         except Exception as e:
             print(f"[YouTubeUploader] Notice setting audience: {e}")
 
@@ -911,9 +914,8 @@ class YouTubeShortsUploader:
                 try:
                     tab_loc = page.locator(tab_sel).first
                     if tab_loc.is_visible():
-                        tab_loc.click()
+                        human_click(page, tab_loc, min_sleep_after=2.5, max_sleep_after=4.0)
                         clicked_tab = True
-                        page.wait_for_timeout(1500)
                         break
                 except Exception:
                     pass
@@ -926,17 +928,13 @@ class YouTubeShortsUploader:
                         is_disabled = next_btn.get_attribute("disabled") or (next_btn.get_attribute("aria-disabled") == "true")
                         if not is_disabled:
                             break
-                        page.wait_for_timeout(500)
-                    try:
-                        next_btn.click(force=True)
-                    except Exception:
-                        page.evaluate("el => el.click()", next_btn)
-                    print(f"[YouTubeUploader] Advanced wizard step {step_attempt + 1}")
-                    page.wait_for_timeout(2000)
+                        time.sleep(0.5)
+                    human_click(page, next_btn, min_sleep_after=2.5, max_sleep_after=4.5)
+                    print(f"[YouTubeUploader] Advanced wizard step {step_attempt + 1} (paused 2.5s-4.5s)")
                 else:
-                    page.wait_for_timeout(1000)
+                    human_sleep(1.0, 2.0)
 
-        page.wait_for_timeout(1500)
+        human_sleep(1.5, 2.5)
 
         # 6. Set Visibility or Schedule Peak Engagement Window
         priv_upper = privacy_status.upper()
@@ -946,36 +944,29 @@ class YouTubeShortsUploader:
             slot_name = scheduled_slot.get("slot_name", "Peak Window")
             print(f"[YouTubeUploader] 📅 Setting Scheduled Mode for peak window: {scheduled_slot.get('display_plan', f'{target_date} @ {target_time}')}...")
 
-            # 1. Expand / Click the Schedule option
-            try:
-                for sel in [
-                    '#schedule-radio-button',
-                    'tp-yt-paper-radio-button[name="SCHEDULE"]',
-                    '#second-container-expand-button',
-                    'tp-yt-paper-radio-button:has-text("Schedule")',
-                ]:
-                    sched_opt = page.locator(sel).first
-                    if sched_opt.is_visible():
-                        sched_opt.click(force=True)
-                        break
-            except Exception:
-                pass
-
-            page.evaluate("""
-                () => {
-                    const r = document.querySelector('tp-yt-paper-radio-button[name="SCHEDULE"]') || document.querySelector('#schedule-radio-button');
-                    if (r) {
-                        r.click();
-                        r.setAttribute('checked', 'true');
-                        r.setAttribute('aria-checked', 'true');
+            # 1. Expand / Click the Schedule option with human click and wait 2.5s
+            sched_opt = page.locator(
+                '#schedule-radio-button, tp-yt-paper-radio-button[name="SCHEDULE"], #second-container-expand-button, tp-yt-paper-radio-button:has-text("Schedule")'
+            ).first
+            if sched_opt.is_visible():
+                human_click(page, sched_opt, min_sleep_after=2.5, max_sleep_after=3.5)
+            else:
+                page.evaluate("""
+                    () => {
+                        const r = document.querySelector('tp-yt-paper-radio-button[name="SCHEDULE"]') || document.querySelector('#schedule-radio-button');
+                        if (r) {
+                            r.click();
+                            r.setAttribute('checked', 'true');
+                            r.setAttribute('aria-checked', 'true');
+                        }
+                        const exp = document.querySelector('#second-container-expand-button');
+                        if (exp) exp.click();
                     }
-                    const exp = document.querySelector('#second-container-expand-button');
-                    if (exp) exp.click();
-                }
-            """)
-            page.wait_for_timeout(1500)
+                """)
+                human_sleep(2.5, 3.5)
 
-            # 2. Set Date in ytcp-visibility-scheduler
+            # 2. Set Date in ytcp-visibility-scheduler with human typing
+            date_set = False
             for d_sel in [
                 "ytcp-visibility-scheduler ytcp-date-picker input",
                 "#datepicker-trigger input",
@@ -986,32 +977,29 @@ class YouTubeShortsUploader:
                 try:
                     d_input = page.locator(d_sel).first
                     if d_input.is_visible():
-                        d_input.click()
-                        page.wait_for_timeout(400)
-                        page.keyboard.press("Control+A")
-                        page.keyboard.type(target_date)
-                        page.keyboard.press("Enter")
-                        page.wait_for_timeout(400)
-                        page.keyboard.press("Tab")
+                        human_type(page, d_input, target_date, clear_first=True, press_enter=True, pause_after=2.0)
+                        date_set = True
                         break
                 except Exception:
                     pass
 
-            page.evaluate(f"""
-                () => {{
-                    const inp = document.querySelector('ytcp-visibility-scheduler ytcp-date-picker input') ||
-                                document.querySelector('#datepicker-trigger input') ||
-                                document.querySelector('ytcp-date-picker input');
-                    if (inp) {{
-                        inp.value = '{target_date}';
-                        inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            if not date_set:
+                page.evaluate(f"""
+                    () => {{
+                        const inp = document.querySelector('ytcp-visibility-scheduler ytcp-date-picker input') ||
+                                    document.querySelector('#datepicker-trigger input') ||
+                                    document.querySelector('ytcp-date-picker input');
+                        if (inp) {{
+                            inp.value = '{target_date}';
+                            inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        }}
                     }}
-                }}
-            """)
-            page.wait_for_timeout(1000)
+                """)
+                human_sleep(1.5, 2.0)
 
-            # 3. Set Time in ytcp-visibility-scheduler
+            # 3. Set Time in ytcp-visibility-scheduler with human typing
+            time_set = False
             for t_sel in [
                 "ytcp-visibility-scheduler #time-of-day-trigger input",
                 "#time-of-day-trigger input",
@@ -1021,29 +1009,26 @@ class YouTubeShortsUploader:
                 try:
                     t_input = page.locator(t_sel).first
                     if t_input.is_visible():
-                        t_input.click()
-                        page.wait_for_timeout(400)
-                        page.keyboard.press("Control+A")
-                        page.keyboard.type(target_time)
-                        page.keyboard.press("Enter")
-                        page.wait_for_timeout(400)
-                        page.keyboard.press("Tab")
+                        human_type(page, t_input, target_time, clear_first=True, press_enter=True, pause_after=2.5)
+                        time_set = True
                         break
                 except Exception:
                     pass
 
-            page.evaluate(f"""
-                () => {{
-                    const inp = document.querySelector('ytcp-visibility-scheduler #time-of-day-trigger input') ||
-                                document.querySelector('#time-of-day-trigger input');
-                    if (inp) {{
-                        inp.value = '{target_time}';
-                        inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            if not time_set:
+                page.evaluate(f"""
+                    () => {{
+                        const inp = document.querySelector('ytcp-visibility-scheduler #time-of-day-trigger input') ||
+                                    document.querySelector('#time-of-day-trigger input');
+                        if (inp) {{
+                            inp.value = '{target_time}';
+                            inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        }}
                     }}
-                }}
-            """)
-            page.wait_for_timeout(1000)
+                """)
+                human_sleep(2.0, 2.5)
+
             print(f"[YouTubeUploader] Configured Schedule Slot: {target_date} @ {target_time} ({slot_name})")
         else:
             try:
@@ -1177,19 +1162,28 @@ class YouTubeShortsUploader:
         if not upload_complete:
             raise RuntimeError(f"YouTube upload did not reach 100% completion within timeout. Last status: '{status_text}'")
 
-        # 8. Click Done / Schedule / Publish button
+        # 8. Calm checks waiting buffer & human-like Done / Schedule click
         action_verb = "Schedule" if scheduled_slot else "Publish"
-        print(f"[YouTubeUploader] 100% upload bytes confirmed. Saving / {action_verb}ing Short...")
+        print(f"[YouTubeUploader] 100% upload bytes confirmed. Waiting calmly (up to 45-60s) for checks to complete...")
+        checks_start = time.time()
+        last_jitter = checks_start
+        while time.time() - checks_start < 50:
+            status_text, _ = self._get_upload_status(page)
+            low_s = status_text.lower()
+            if "checks complete" in low_s or "no issues found" in low_s:
+                print(f"[YouTubeUploader] ✅ Checks completed naturally: {status_text.replace(chr(10), ' ').strip()[:70]}")
+                human_sleep(2.0, 3.5)
+                break
+            if time.time() - last_jitter >= 15:
+                human_move_mouse_jitter(page, count=1)
+                last_jitter = time.time()
+            time.sleep(2.0)
 
         # Ensure we are fully on the final publish/schedule step
         for _ in range(4):
             nxt = page.locator("#next-button:not([hidden]):visible, ytcp-button#next-button:not([hidden]):visible").first
             if nxt.is_visible():
-                try:
-                    nxt.click(force=True)
-                except Exception:
-                    page.evaluate("el => el.click()", nxt)
-                page.wait_for_timeout(1500)
+                human_click(page, nxt, min_sleep_after=2.0, max_sleep_after=3.5)
             else:
                 break
 
@@ -1206,7 +1200,7 @@ class YouTubeShortsUploader:
                     }}
                 }}
             """)
-            page.wait_for_timeout(1000)
+            human_sleep(1.0, 2.0)
 
         # Locate Done / Schedule / Publish button
         done_btn = page.locator(
@@ -1219,65 +1213,33 @@ class YouTubeShortsUploader:
                 is_disabled = done_btn.get_attribute("disabled") or (done_btn.get_attribute("aria-disabled") == "true")
                 if not is_disabled:
                     break
-            page.wait_for_timeout(1000)
+            time.sleep(1.0)
 
-        # Click schedule/publish via Playwright and JavaScript fallback
-        published_clicked = False
-        for click_target in [
-            page.locator("#done-button button, ytcp-button#done-button button").first,
-            page.locator("button:has-text('Schedule'), button:has-text('Save'), button:has-text('Publish')").first,
-            done_btn,
-        ]:
-            try:
-                if click_target.count() > 0 and click_target.is_visible():
-                    click_target.click(force=True, timeout=5000)
-                    published_clicked = True
-                    break
-            except Exception:
-                pass
+        human_sleep(1.5, 2.5)
+        print(f"[YouTubeUploader] Clicking {action_verb} for '{title}' with stealth click...")
+        human_click(page, done_btn, min_sleep_after=2.0, max_sleep_after=3.5)
 
-        if not published_clicked:
-            published_clicked = page.evaluate("""
-                () => {
-                    const btn = document.querySelector('#done-button button') ||
-                                document.querySelector('#done-button') || 
-                                document.querySelector('ytcp-button#done-button') ||
-                                document.querySelector('button[aria-label="Schedule"]') ||
-                                document.querySelector('button[aria-label="Publish"]') ||
-                                document.querySelector('button[aria-label="Save"]');
-                    if (btn) {
-                        btn.removeAttribute('disabled');
-                        btn.removeAttribute('aria-disabled');
-                        btn.removeAttribute('hidden');
-                        btn.click();
-                        return true;
-                    }
-                    return false;
-                }
-            """)
-
-        print(f"[YouTubeUploader] Clicked {action_verb} for '{title}'.")
-
-        # Handle 'We're still checking your content' or 'Checks are still running' popup
+        # Handle 'We're still checking your content', 'Checks are still running', 'Got it', 'Schedule anyway' popup
         try:
-            page.wait_for_timeout(1500)
+            time.sleep(1.5)
             for _ in range(5):
                 check_box = page.locator(
                     "ytcp-dialog:has-text('checking your content'), ytcp-dialog:has-text('Checks are still running'), "
-                    "ytcp-dialog:has-text('Schedule anyway'), ytcp-dialog:has-text('Publish anyway')"
+                    "ytcp-dialog:has-text('Schedule anyway'), ytcp-dialog:has-text('Publish anyway'), ytcp-dialog:has-text('Got it')"
                 ).first
                 if check_box.is_visible():
-                    print(f"[YouTubeUploader] ⚠️ Content check dialog appeared. Confirming '{action_verb} anyway'...")
+                    print(f"[YouTubeUploader] ⚠️ Content check notice appeared. Pausing 2.0s like a human reading it...")
+                    human_sleep(2.0, 2.5)
                     confirm_btn = check_box.locator(
                         "ytcp-button:has-text('Schedule anyway'), button:has-text('Schedule anyway'), "
                         "ytcp-button:has-text('Publish anyway'), button:has-text('Publish anyway'), "
+                        "ytcp-button:has-text('Got it'), button:has-text('Got it'), "
                         "#confirm-button, #secondary-action-button"
                     ).first
                     if confirm_btn.is_visible():
-                        confirm_btn.click(force=True)
-                        page.wait_for_timeout(2000)
+                        human_click(page, confirm_btn, min_sleep_after=2.0, max_sleep_after=3.0)
                         break
-                page.wait_for_timeout(800)
+                time.sleep(1.0)
         except Exception:
             pass
 
@@ -1379,23 +1341,23 @@ class YouTubeShortsUploader:
         clips: List[Dict[str, Any]],
         privacy_status: str = "public",
         scheduled: bool = True,
-        max_per_day: int = 4,
+        max_per_day: int = 2,
         dry_run: bool = False,
         auto_delete: bool = True,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Uploads multiple clips sequentially within the SAME persistent Playwright browser session.
-        Enforces 100% Scheduled Peak Engagement Windows, rolling 24-hour rate limit (8 uploads max),
+        Enforces 100% Scheduled Peak Engagement Windows, rolling 24-hour rate limit (4 uploads max),
         and immediate local file deletion.
         """
         ledger = ScheduleLedger(self.output_dir / "schedule_ledger.json")
 
-        # 1. Check Rolling 24-Hour Safety Cap (Max 8 uploads per 24 hours)
+        # 1. Check Rolling 24-Hour Safety Cap (Max 4 uploads per 24 hours)
         recent_uploads = ledger.get_recent_upload_count(hours=24)
-        print(f"\n[YouTubeUploader] 📊 24-Hour Rolling Upload Count: {recent_uploads}/8 permitted uploads.")
-        if recent_uploads >= 8:
-            print("[YouTubeUploader] 🛑 Safety Cap Reached: 8 uploads already completed in the last 24 hours!")
+        print(f"\n[YouTubeUploader] 📊 24-Hour Rolling Upload Count: {recent_uploads}/{STUDIO_UPLOAD_SAFETY_CAP} permitted uploads.")
+        if recent_uploads >= STUDIO_UPLOAD_SAFETY_CAP:
+            print(f"[YouTubeUploader] 🛑 Safety Cap Reached: {STUDIO_UPLOAD_SAFETY_CAP} uploads already completed in the last 24 hours!")
             print("[YouTubeUploader] 💾 All clips are preserved safely in output/.\n")
             for c in clips:
                 c["youtube_status"] = "Queued for Next Upload Window (Saved in output/)"
@@ -1524,15 +1486,15 @@ class YouTubeShortsUploader:
             # 2. Upload and Schedule each clip sequentially inside the SAME session
             total_clips = len(clips)
             for idx, clip in enumerate(clips, 1):
-                # Safety Rate Limiter Check (rolling 24h cap of 8 uploads)
-                if recent_uploads >= 8:
-                    print(f"\n[YouTubeUploader] 🛑 Reached 24-hour upload safety limit (8 uploads).")
+                # Safety Rate Limiter Check (rolling 24h cap of 4 uploads)
+                if recent_uploads >= STUDIO_UPLOAD_SAFETY_CAP:
+                    print(f"\n[YouTubeUploader] 🛑 Reached 24-hour upload safety limit ({STUDIO_UPLOAD_SAFETY_CAP} uploads).")
                     print(f"[YouTubeUploader] 💾 Preserving remaining {total_clips - idx + 1} clip(s) safely in output/.\n")
                     for rem_idx in range(idx - 1, total_clips):
                         rem_clip = clips[rem_idx]
                         rem_clip["upload_result"] = {
                             "status": "queued_rate_limit",
-                            "error": "24-hour upload safety cap (8 uploads) reached.",
+                            "error": f"24-hour upload safety cap ({STUDIO_UPLOAD_SAFETY_CAP} uploads) reached.",
                         }
                         rem_clip["youtube_status"] = "Queued for Next Upload Window (Saved in output/)"
                         rem_clip["file_deleted"] = False
@@ -1684,7 +1646,14 @@ class YouTubeShortsUploader:
                     except Exception:
                         pass
 
-                page.wait_for_timeout(3000)
+                # Inter-Clip Cooldown: randomized 15-25 seconds before next clip
+                if idx < total_clips:
+                    cooldown = random.uniform(15.0, 25.0)
+                    print(f"\n[YouTubeUploader] ⏳ Inter-clip stealth cooldown: pausing {cooldown:.1f}s on dashboard before next clip...")
+                    human_move_mouse_jitter(page, count=2)
+                    time.sleep(cooldown)
+                else:
+                    human_sleep(2.0, 3.5)
 
             print("\n[YouTubeUploader] All clips processed. Closing browser session...")
             try:
@@ -1896,7 +1865,7 @@ class YouTubeShortsUploader:
         clips: List[Dict[str, Any]],
         privacy_status: str = "public",
         scheduled: bool = True,
-        max_per_day: int = 4,
+        max_per_day: int = 2,
         dry_run: bool = False,
         auto_delete: bool = True,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
