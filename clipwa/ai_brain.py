@@ -120,14 +120,17 @@ class ViralMomentDetector:
 
         # Count alphabetic characters
         alpha_chars = re.findall(r"[a-zA-Z]", cleaned)
-        if len(alpha_chars) < 3:
-            # Fall back to generating from transcript dialogue keywords
+        if len(alpha_chars) < 4:
+            # Fall back to generating from transcript dialogue keywords or hook
             fallback_title = self._smart_heuristic_title(fallback_dialogue)
             cleaned_fb = re.sub(r"#shorts\b", "", fallback_title, flags=re.IGNORECASE).strip()
             cleaned_fb = re.sub(r"[#*_><`~|]+", " ", cleaned_fb)
             cleaned_fb = re.sub(r"\s+", " ", cleaned_fb).strip().strip('"\'“”‘’')
-            if len(re.findall(r"[a-zA-Z]", cleaned_fb)) >= 3:
+            if len(re.findall(r"[a-zA-Z]", cleaned_fb)) >= 4:
                 cleaned = cleaned_fb
+            elif fallback_dialogue and len(re.findall(r"[a-zA-Z]", fallback_dialogue)) >= 4:
+                first_phrase = re.split(r"[.!?\n]", fallback_dialogue)[0].strip()
+                cleaned = re.sub(r"[#*_><`~|]+", " ", first_phrase)[:50].strip()
             else:
                 cleaned = "The Mindset That Changes Everything 🔥"
 

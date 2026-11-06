@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -90,6 +91,78 @@ class MediaDownloader:
         if self.ffmpeg_dir not in path_parts:
             os.environ["PATH"] = f"{self.ffmpeg_dir}{os.pathsep}{current_path}"
 
+    def _ensure_cookies_file(self) -> Optional[str]:
+        """
+        Export authenticated cookies from Playwright's persistent profile if available.
+        Ensures yt-dlp has signed-in authorization to bypass bot detection.
+        """
+        cookies_path = self.temp_dir / "cookies.txt"
+        profile_dir = Path(Config.BASE_DIR) / "youtube_auth_profile"
+        if not profile_dir.exists():
+            return str(cookies_path) if cookies_path.exists() else None
+
+        # If cookies.txt is fresh (< 6 hours old) and non-empty, use it
+        try:
+            if cookies_path.exists() and (time.time() - cookies_path.stat().st_mtime < 21600) and cookies_path.stat().st_size > 500:
+                return str(cookies_path)
+        except Exception:
+            pass
+
+        try:
+            from playwright.sync_api import sync_playwright
+            # Unlock profile lockfiles if any
+            for lf in ["SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"]:
+                f = profile_dir / lf
+                if f.exists():
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+            with sync_playwright() as p:
+                browser = p.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir.resolve()),
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
+                )
+                cookies = browser.cookies()
+                browser.close()
+
+            if cookies:
+                with open(cookies_path, "w", encoding="utf-8") as f:
+                    f.write("# Netscape HTTP Cookie File\n")
+                    now = int(time.time())
+                    for c in cookies:
+                        domain = c.get("domain", "")
+                        flag = "TRUE" if domain.startswith(".") else "FALSE"
+                        path = c.get("path", "/")
+                        secure = "TRUE" if c.get("secure") else "FALSE"
+                        expires = int(c.get("expires", 0))
+                        if expires <= 0:
+                            expires = now + 86400 * 30
+                        name = c.get("name", "")
+                        value = c.get("value", "")
+                        f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
+                return str(cookies_path)
+        except Exception:
+            pass
+
+        return str(cookies_path) if cookies_path.exists() else None
+
+    def _get_base_ydl_opts(self) -> Dict[str, Any]:
+        """Base yt-dlp options configured with Node.js challenge solver and persistent cookies."""
+        cookiefile = self._ensure_cookies_file()
+        opts: Dict[str, Any] = {
+            "ffmpeg_location": self.ffmpeg_path,
+            "js_runtimes": {"node": {}},
+            "remote_components": ["ejs:github"],
+            "socket_timeout": 30,
+            "retries": 20,
+            "fragment_retries": 20,
+        }
+        if cookiefile and os.path.exists(cookiefile):
+            opts["cookiefile"] = cookiefile
+        return opts
+
     def _has_valid_video(self, file_path: str) -> bool:
         """Verify that a media file exists, has size > 1000, and contains a readable video stream with width > 0 and height > 0."""
         if not file_path or not os.path.exists(file_path):
@@ -155,14 +228,11 @@ class MediaDownloader:
             }
 
         ydl_opts = {
+            **self._get_base_ydl_opts(),
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
-            "ffmpeg_location": self.ffmpeg_path,
             "logger": SilentYDLLogger(),
-            "socket_timeout": 30,
-            "retries": 20,
-            "fragment_retries": 20,
             "skip_unavailable_fragments": True,
             "abort_on_error": False,
         }
@@ -216,13 +286,13 @@ class MediaDownloader:
                 pass
 
         sub_opts = {
+            **self._get_base_ydl_opts(),
             "skip_download": True,
             "writeautomaticsub": True,
             "writesubtitles": True,
             "subtitleslangs": ["en", "en-orig", "en-US", "en-GB"],
             "subtitlesformat": "json3/vtt/srt",
             "outtmpl": f"{sub_prefix}.%(ext)s",
-            "ffmpeg_location": self.ffmpeg_path,
             "logger": SilentYDLLogger(),
             "socket_timeout": 15,
             "retries": 1,
@@ -283,15 +353,12 @@ class MediaDownloader:
                 })
 
         audio_opts = {
+            **self._get_base_ydl_opts(),
             "format": "ba[abr<=64]/ba[ext=m4a]/ba/b",
             "outtmpl": audio_output_template,
-            "ffmpeg_location": self.ffmpeg_path,
             "concurrent_fragment_downloads": 8,
             "logger": SilentYDLLogger(),
             "external_downloader": {"default": "native"},
-            "socket_timeout": 30,
-            "retries": 10,
-            "fragment_retries": 10,
             "skip_unavailable_fragments": True,
             "abort_on_error": False,
             "quiet": True,
@@ -395,18 +462,15 @@ class MediaDownloader:
 
         try:
             ydl_opts = {
+                **self._get_base_ydl_opts(),
                 "format": primary_format,
                 "outtmpl": f"{temp_base}.%(ext)s",
                 "merge_output_format": "mp4",
                 "download_ranges": download_range_func(None, ranges),
                 "force_keyframes_at_cuts": False,
                 "concurrent_fragment_downloads": 8,
-                "ffmpeg_location": self.ffmpeg_path,
                 "logger": SilentYDLLogger(),
                 "external_downloader": {"default": "native"},
-                "socket_timeout": 30,
-                "retries": 20,
-                "fragment_retries": 20,
                 "skip_unavailable_fragments": True,
                 "abort_on_error": False,
                 "overwrites": True,
@@ -495,16 +559,13 @@ class MediaDownloader:
                 pass
 
         fallback_opts = {
+            **self._get_base_ydl_opts(),
             "format": "18/b[ext=mp4]/b[vcodec!=none]/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080][ext=mp4]/b[vcodec!=none]",
             "outtmpl": f"{fallback_base}.%(ext)s",
             "merge_output_format": "mp4",
             "abort_on_error": False,
             "external_downloader": {"default": "native"},
-            "ffmpeg_location": self.ffmpeg_path,
             "logger": SilentYDLLogger(),
-            "socket_timeout": 30,
-            "retries": 20,
-            "fragment_retries": 20,
             "skip_unavailable_fragments": True,
             "overwrites": True,
             "quiet": True,
@@ -727,16 +788,13 @@ class MediaDownloader:
                 })
 
         ydl_opts = {
+            **self._get_base_ydl_opts(),
             "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best",
             "outtmpl": video_output_template,
             "merge_output_format": "mp4",
             "abort_on_error": False,
-            "ffmpeg_location": self.ffmpeg_path,
             "logger": SilentYDLLogger(),
             "concurrent_fragment_downloads": 8,
-            "socket_timeout": 30,
-            "retries": 20,
-            "fragment_retries": 20,
             "skip_unavailable_fragments": True,
             "quiet": True,
             "no_warnings": True,

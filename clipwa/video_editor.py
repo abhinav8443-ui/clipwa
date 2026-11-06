@@ -12,6 +12,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["GLOG_minloglevel"] = "3"
 os.environ["ABSL_MIN_LOG_LEVEL"] = "3"
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -20,6 +21,8 @@ import cv2
 import numpy as np
 
 from .config import Config
+
+logger = logging.getLogger("clipwa.video_editor")
 
 
 @contextlib.contextmanager
@@ -280,6 +283,7 @@ class VideoEditor:
         output_filename: str,
         subtitle_ass_path: Optional[str] = None,
         layout_mode: str = "9:16",
+        clip_index: int = 1,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> str:
         """
@@ -377,9 +381,20 @@ class VideoEditor:
         else:
             final_map_v = current_v
 
-        # Audio mixing: Voice compressor + Hook SFX at 0.0s + Looping background tune
+        # Audio mixing: Voice compressor + Hook SFX at 0.0s + Rotated viral background track
         hook_sfx_path = Config.BASE_DIR / "assets" / "audio" / "hook_sfx.wav"
-        bg_tune_path = Config.BASE_DIR / "assets" / "audio" / "bg_tune.wav"
+        custom_tracks_dir = Config.BASE_DIR / "assets" / "audio" / "custom_tracks"
+        custom_tracks = sorted(list(custom_tracks_dir.glob("*.wav"))) if custom_tracks_dir.exists() else []
+
+        if custom_tracks:
+            bg_tune_path = custom_tracks[(clip_index - 1) % len(custom_tracks)]
+            print(f"[VideoEditor] Using rotated viral background track [{clip_index}]: {bg_tune_path.name}")
+            logger.info(f"Using rotated viral background track [{clip_index}]: {bg_tune_path.name}")
+        else:
+            bg_tune_path = Config.BASE_DIR / "assets" / "audio" / "bg_tune.wav"
+            print(f"[VideoEditor] Using default background track: {bg_tune_path.name}")
+            logger.info(f"Using default background track: {bg_tune_path.name}")
+
         has_audio_assets = hook_sfx_path.exists() and bg_tune_path.exists()
         has_source_audio = self._has_audio_stream(video_path)
 
@@ -393,7 +408,7 @@ class VideoEditor:
             audio_filter = (
                 f"[0:a]highpass=f=80,acompressor=threshold=-18dB:ratio=3:attack=15:release=150,loudnorm=I=-14:TP=-1.5:LRA=11[voice]; "
                 f"[1:a]volume=0.45[hook]; "
-                f"[2:a]volume=0.10[bg]; "
+                f"[2:a]volume=0.11[bg]; "
                 f"[voice][hook][bg]amix=inputs=3:duration=first:dropout_transition=2[outa]"
             )
             filter_parts.append(audio_filter)

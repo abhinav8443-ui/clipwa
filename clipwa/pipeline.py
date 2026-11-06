@@ -51,6 +51,15 @@ class ClipwaPipeline:
             temp_dir=self.temp_dir,
         )
 
+        # Ensure custom viral background tracks are ready
+        try:
+            from .setup_custom_tracks import download_and_prepare_custom_tracks
+            custom_tracks_dir = Config.BASE_DIR / "assets" / "audio" / "custom_tracks"
+            if not custom_tracks_dir.exists() or len(list(custom_tracks_dir.glob("*.wav"))) < 3:
+                download_and_prepare_custom_tracks()
+        except Exception:
+            pass
+
     def process_video(
         self,
         url_or_path: str,
@@ -258,6 +267,7 @@ class ClipwaPipeline:
                 output_filename=out_mp4_name,
                 subtitle_ass_path=ass_path,
                 layout_mode=layout_mode,
+                clip_index=clip_num,
                 progress_callback=lambda d: notify("render_progress", f"Rendering clip {clip_num}...", d),
             )
 
