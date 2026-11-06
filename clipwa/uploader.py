@@ -1342,6 +1342,7 @@ class YouTubeShortsUploader:
         privacy_status: str = "public",
         scheduled: bool = True,
         max_per_day: int = 2,
+        force: bool = False,
         dry_run: bool = False,
         auto_delete: bool = True,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -1356,7 +1357,7 @@ class YouTubeShortsUploader:
         # 1. Check Rolling 24-Hour Safety Cap (Max 4 uploads per 24 hours)
         recent_uploads = ledger.get_recent_upload_count(hours=24)
         print(f"\n[YouTubeUploader] 📊 24-Hour Rolling Upload Count: {recent_uploads}/{STUDIO_UPLOAD_SAFETY_CAP} permitted uploads.")
-        if recent_uploads >= STUDIO_UPLOAD_SAFETY_CAP:
+        if not force and recent_uploads >= STUDIO_UPLOAD_SAFETY_CAP:
             print(f"[YouTubeUploader] 🛑 Safety Cap Reached: {STUDIO_UPLOAD_SAFETY_CAP} uploads already completed in the last 24 hours!")
             print("[YouTubeUploader] 💾 All clips are preserved safely in output/.\n")
             for c in clips:
@@ -1487,7 +1488,7 @@ class YouTubeShortsUploader:
             total_clips = len(clips)
             for idx, clip in enumerate(clips, 1):
                 # Safety Rate Limiter Check (rolling 24h cap of 4 uploads)
-                if recent_uploads >= STUDIO_UPLOAD_SAFETY_CAP:
+                if not force and recent_uploads >= STUDIO_UPLOAD_SAFETY_CAP:
                     print(f"\n[YouTubeUploader] 🛑 Reached 24-hour upload safety limit ({STUDIO_UPLOAD_SAFETY_CAP} uploads).")
                     print(f"[YouTubeUploader] 💾 Preserving remaining {total_clips - idx + 1} clip(s) safely in output/.\n")
                     for rem_idx in range(idx - 1, total_clips):
@@ -1866,6 +1867,7 @@ class YouTubeShortsUploader:
         privacy_status: str = "public",
         scheduled: bool = True,
         max_per_day: int = 2,
+        force: bool = False,
         dry_run: bool = False,
         auto_delete: bool = True,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -1898,6 +1900,7 @@ class YouTubeShortsUploader:
             privacy_status=privacy_status,
             scheduled=scheduled,
             max_per_day=max_per_day,
+            force=force,
             dry_run=dry_run,
             auto_delete=auto_delete,
             progress_callback=progress_callback,

@@ -587,6 +587,7 @@ class ClipwaPipeline:
                         privacy_status=privacy_status,
                         scheduled=scheduled,
                         max_per_day=max_per_day,
+                        force=force,
                         dry_run=dry_run,
                         auto_delete=(not insta_needed),  # only auto-delete if Instagram is not needed
                         progress_callback=upload_cb,
