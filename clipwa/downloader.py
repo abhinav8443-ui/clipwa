@@ -389,25 +389,8 @@ class MediaDownloader:
         """
         dur = max(1.0, end_time - start_time)
 
-        # If local file, use FFmpeg fast stream copy or re-encode
+        # If local file, use frame-accurate re-encode to eliminate keyframe drift
         if os.path.exists(url_or_path):
-            cmd = [
-                self.ffmpeg_path,
-                "-y",
-                "-ss",
-                f"{start_time:.3f}",
-                "-t",
-                f"{dur:.3f}",
-                "-i",
-                url_or_path,
-                "-c",
-                "copy",
-                output_path,
-            ]
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            if self._has_valid_video(output_path):
-                return output_path
-            # If stream copy failed or produced no video, re-encode cleanly
             cmd = [
                 self.ffmpeg_path,
                 "-y",
@@ -421,12 +404,38 @@ class MediaDownloader:
                 "libx264",
                 "-preset",
                 "superfast",
+                "-crf",
+                "18",
                 "-c:a",
                 "aac",
+                "-b:a",
+                "192k",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-movflags",
+                "+faststart",
                 output_path,
             ]
             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            return output_path
+            if self._has_valid_video(output_path):
+                # Ensure output duration matches requested duration without drift
+                out_dur = self._get_media_duration(output_path)
+                if out_dur > dur + 0.08:
+                    tmp_exact = output_path + ".exact.mp4"
+                    exact_cmd = [
+                        self.ffmpeg_path,
+                        "-y",
+                        "-i", output_path,
+                        "-t", f"{dur:.3f}",
+                        "-c:v", "copy",
+                        "-c:a", "copy",
+                        "-movflags", "+faststart",
+                        tmp_exact,
+                    ]
+                    subprocess.run(exact_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                    if self._has_valid_video(tmp_exact):
+                        shutil.move(tmp_exact, output_path)
+                return output_path
 
         def hook(d: Dict[str, Any]) -> None:
             if progress_callback and d.get("status") == "downloading":
@@ -528,6 +537,23 @@ class MediaDownloader:
                 ]
                 subprocess.run(trim_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
                 if self._has_valid_video(output_path):
+                    # Frame-accurate post-trim verification to eliminate keyframe drift
+                    out_dur = self._get_media_duration(output_path)
+                    if out_dur > dur + 0.08:
+                        tmp_exact = output_path + ".exact.mp4"
+                        exact_cmd = [
+                            self.ffmpeg_path,
+                            "-y",
+                            "-i", output_path,
+                            "-t", f"{dur:.3f}",
+                            "-c:v", "copy",
+                            "-c:a", "copy",
+                            "-movflags", "+faststart",
+                            tmp_exact,
+                        ]
+                        subprocess.run(exact_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                        if self._has_valid_video(tmp_exact):
+                            shutil.move(tmp_exact, output_path)
                     try:
                         os.remove(downloaded_raw)
                     except Exception:
@@ -621,6 +647,24 @@ class MediaDownloader:
 
         if not self._has_valid_video(output_path):
             raise RuntimeError(f"FFmpeg trim completed but output file '{output_path}' contains no valid video stream.")
+
+        # Frame-accurate post-trim verification to eliminate keyframe drift
+        out_dur = self._get_media_duration(output_path)
+        if out_dur > dur + 0.08:
+            tmp_exact = output_path + ".exact.mp4"
+            exact_cmd = [
+                self.ffmpeg_path,
+                "-y",
+                "-i", output_path,
+                "-t", f"{dur:.3f}",
+                "-c:v", "copy",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                tmp_exact,
+            ]
+            subprocess.run(exact_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            if self._has_valid_video(tmp_exact):
+                shutil.move(tmp_exact, output_path)
 
         return output_path
 

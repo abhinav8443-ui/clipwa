@@ -14,7 +14,7 @@ from .ai_brain import ViralMomentDetector
 from .config import Config, atomic_write_json
 from .downloader import MediaDownloader
 from .subtitle_generator import SubtitleGenerator
-from .transcriber import LocalTranscriber
+from .transcriber import LocalTranscriber, snap_to_complete_thought
 from .uploader import YouTubeShortsUploader
 from .insta_uploader import InstagramReelsUploader
 from .video_editor import VideoEditor
@@ -167,11 +167,22 @@ class ClipwaPipeline:
         if not moments:
             notify("warning", "No distinct viral moments detected, selecting fallback clip from start.")
             total_dur = min(max_clip_duration, media_info.get("duration", 30))
+            b = snap_to_complete_thought(
+                words=transcript_data.get("words", []),
+                segments=transcript_data.get("segments", []),
+                proposed_start=0.0,
+                proposed_end=total_dur,
+                min_dur=min_clip_duration,
+                max_dur=max_clip_duration,
+            )
             moments = [{
                 "clip_id": 1,
-                "start_time": 0.0,
-                "end_time": round(total_dur, 2),
-                "duration": round(total_dur, 2),
+                "start_time": b.start_time,
+                "end_time": b.end_time,
+                "duration": b.duration,
+                "start_text": b.start_text,
+                "end_text": b.end_text,
+                "full_text": b.full_text,
                 "virality_score": 85,
                 "hook_text": media_info.get("title", "Highlight")[:40],
                 "reason": "Intro highlight moment",
@@ -179,6 +190,7 @@ class ClipwaPipeline:
                 "youtube_description": f"Highlight from {media_info.get('title', 'video')} #Shorts",
                 "tags": ["shorts", "viral", "clip"],
             }]
+            print(f'[BoundaryLock] Clip 1 locked: Starts with "{b.start_text}..." -> Ends with "...{b.end_text}" (Duration: {b.duration:.1f}s)')
 
         results["detected_moments"] = moments
 

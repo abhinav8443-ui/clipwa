@@ -15,6 +15,7 @@ import urllib.request
 import urllib.error
 
 from .config import Config, atomic_write_json
+from .transcriber import BoundaryResult, snap_to_complete_thought
 
 
 def _sanitize_youtube_text(text: str) -> str:
@@ -228,6 +229,7 @@ class ViralMomentDetector:
         refined_clips = self._deduplicate_and_refine_clips(
             raw_clips=candidates,
             segments=segments,
+            words=transcript_data.get("words", []),
             total_duration=total_duration,
             max_clips=max_clips,
             min_dur=min_duration,
@@ -317,9 +319,13 @@ Every clip MUST have a complete, satisfying story arc:
 - [5s - 40s] The Meat / Struggle: The real battle, story of endurance, or core mindset explanation.
 - [40s - 58s] The Payoff / Lesson: A powerful concluding punchline, realization, or life lesson that leaves the viewer deeply inspired.
 
-CRITICAL TIMESTAMP RULES:
+CRITICAL BOUNDARY & NARRATIVE CLOSURE RULES:
+- Every clip MUST contain a complete narrative arc: Hook -> Core Value -> Final Punchline.
+- The start_time MUST snap cleanly to the start of the first spoken sentence.
+- The end_time MUST correspond to the exact end of the final concluding sentence.
+- NEVER stop on a comma, conjunction, or unfinished point!
+- NEVER include the first 1–3 words of the next topic after the speaker finishes their point!
 - Each clip duration MUST be between {min_dur:.0f} and {max_dur:.0f} seconds (ideal sweet spot: 40s - 55s).
-- NEVER cut mid-sentence! Both start_time and end_time MUST align with complete sentences.
 - SPREAD ACROSS THE VIDEO: Select clips from completely DIFFERENT parts of the video! Every clip's start_time MUST be at least 120 seconds away from any other clip.
 
 TITLES:
@@ -475,62 +481,22 @@ Transcript:
         segments: List[Dict[str, Any]],
         min_dur: float = 35.0,
         max_dur: float = 58.0,
+        words: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[float, float]:
         """
         Snaps start_time and end_time to clean sentence boundaries
-        so the speaker is never cut mid-sentence.
+        so the speaker is never cut mid-sentence and thought is complete.
+        Delegates to word-level snap_to_complete_thought.
         """
-        if not segments:
-            return raw_start, raw_end
-
-        # 1. Find segment closest to raw_start
-        start_idx = 0
-        min_start_diff = float("inf")
-        for i, s in enumerate(segments):
-            diff = abs(s.get("start", 0) - raw_start)
-            if diff < min_start_diff:
-                min_start_diff = diff
-                start_idx = i
-
-        snapped_start = segments[start_idx].get("start", raw_start)
-
-        # 2. Find clean closing segment within [min_dur, max_dur]
-        snapped_end = min(snapped_start + max_dur, raw_end)
-        best_end = None
-        best_punc_diff = float("inf")
-
-        ideal_target = snapped_start + 48.0  # Sweet spot for retention
-
-        for j in range(start_idx, len(segments)):
-            seg = segments[j]
-            seg_end = seg.get("end", 0)
-            dur = seg_end - snapped_start
-
-            if dur < min_dur:
-                continue
-            if dur > max_dur:
-                break
-
-            seg_text = seg.get("text", "").strip()
-            # If segment ends with sentence terminator, strongly favor it
-            has_terminator = bool(re.search(r'[.!?]["\']?$', seg_text))
-            diff_from_ideal = abs(dur - 48.0)
-
-            if has_terminator and diff_from_ideal < best_punc_diff:
-                best_punc_diff = diff_from_ideal
-                best_end = seg_end
-
-        if best_end is not None:
-            snapped_end = best_end
-        else:
-            # Fallback: take segment end within bounds closest to ideal duration
-            for j in range(start_idx, len(segments)):
-                seg_end = segments[j].get("end", 0)
-                dur = seg_end - snapped_start
-                if min_dur <= dur <= max_dur:
-                    snapped_end = seg_end
-
-        return round(snapped_start, 2), round(snapped_end, 2)
+        b = snap_to_complete_thought(
+            words=words,
+            segments=segments,
+            proposed_start=raw_start,
+            proposed_end=raw_end,
+            min_dur=min_dur,
+            max_dur=max_dur,
+        )
+        return b.start_time, b.end_time
 
     def _deduplicate_and_refine_clips(
         self,
@@ -541,6 +507,7 @@ Transcript:
         min_dur: float = 35.0,
         max_dur: float = 58.0,
         min_distance_sec: float = 120.0,
+        words: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Enforces:
@@ -550,6 +517,7 @@ Transcript:
         4. Strict non-overlapping: every selected clip's start_time MUST be at least
            120s away from any already-selected clip.
         5. Fills any deficit with fresh heuristic candidates from other parts of the video.
+        6. Post-LLM/post-algorithmic verification pass with [BoundaryLock] confirmation log.
         """
         min_allowed_start = 35.0 if total_duration > 600 else 0.0
 
@@ -563,8 +531,17 @@ Transcript:
                 st = min_allowed_start
                 et = st + 45.0
 
-            snapped_st, snapped_et = self._snap_to_clean_sentence(st, et, segments, min_dur, max_dur)
-            dur = round(snapped_et - snapped_st, 2)
+            b = snap_to_complete_thought(
+                words=words,
+                segments=segments,
+                proposed_start=st,
+                proposed_end=et,
+                min_dur=min_dur,
+                max_dur=max_dur,
+            )
+            snapped_st = b.start_time
+            snapped_et = b.end_time
+            dur = b.duration
 
             if dur < min_dur or dur > max_dur:
                 continue
@@ -579,6 +556,9 @@ Transcript:
                 "start_time": snapped_st,
                 "end_time": snapped_et,
                 "duration": dur,
+                "start_text": b.start_text,
+                "end_text": b.end_text,
+                "full_text": b.full_text or dialogue,
                 "virality_score": int(c.get("virality_score", 90)),
                 "hook_text": _sanitize_youtube_text(str(c.get("hook_text") or dialogue[:80] + "...")),
                 "reason": _sanitize_youtube_text(str(c.get("reason") or "High-impact motivational breakthrough")),
@@ -625,14 +605,29 @@ Transcript:
             for cand in heuristic_extras:
                 st = cand["start_time"]
                 et = cand["end_time"]
+                b = snap_to_complete_thought(
+                    words=words,
+                    segments=segments,
+                    proposed_start=st,
+                    proposed_end=et,
+                    min_dur=min_dur,
+                    max_dur=max_dur,
+                )
+                cand["start_time"] = b.start_time
+                cand["end_time"] = b.end_time
+                cand["duration"] = b.duration
+                cand["start_text"] = b.start_text
+                cand["end_text"] = b.end_text
+                cand["full_text"] = b.full_text or cand.get("full_text", "")
+
                 is_valid = True
                 for sel in selected:
                     s_st = sel["start_time"]
                     s_et = sel["end_time"]
-                    if abs(st - s_st) < min_distance_sec:
+                    if abs(cand["start_time"] - s_st) < min_distance_sec:
                         is_valid = False
                         break
-                    if not (et <= s_st - 30.0 or st >= s_et + 30.0):
+                    if not (cand["end_time"] <= s_st - 30.0 or cand["start_time"] >= s_et + 30.0):
                         is_valid = False
                         break
 
@@ -642,9 +637,24 @@ Transcript:
                     if len(selected) >= max_clips:
                         break
 
-        # Final renumbering and ordering by clip_id
+        # Post-LLM / post-algorithmic boundary lock verification pass
         for i, c in enumerate(selected, 1):
             c["clip_id"] = i
+            b = snap_to_complete_thought(
+                words=words,
+                segments=segments,
+                proposed_start=c["start_time"],
+                proposed_end=c["end_time"],
+                min_dur=min_dur,
+                max_dur=max_dur,
+            )
+            c["start_time"] = b.start_time
+            c["end_time"] = b.end_time
+            c["duration"] = b.duration
+            c["start_text"] = b.start_text
+            c["end_text"] = b.end_text
+            c["full_text"] = b.full_text or c.get("full_text", "")
+            print(f'[BoundaryLock] Clip {i} locked: Starts with "{b.start_text}..." -> Ends with "...{b.end_text}" (Duration: {b.duration:.1f}s)')
 
         return selected
 

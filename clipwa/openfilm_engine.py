@@ -235,10 +235,12 @@ class OpenFilmEngine:
         clip_actual_dur = self.probe_duration(target_video)
 
         has_hook_sfx = False
+        sfx_actual_dur = 0.0
         if hook_sfx_path and Path(hook_sfx_path).exists():
             target_sfx = assets_dir / "hook_sfx.wav"
             try:
                 shutil.copyfile(hook_sfx_path, target_sfx)
+                sfx_actual_dur = self.probe_duration(target_sfx)
                 has_hook_sfx = target_sfx.exists() and target_sfx.stat().st_size > 0
             except Exception:
                 pass
