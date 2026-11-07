@@ -1355,9 +1355,9 @@ class YouTubeShortsUploader:
         ledger = ScheduleLedger(self.output_dir / "schedule_ledger.json")
 
         # 1. Check Rolling 24-Hour Safety Cap (Max 4 uploads per 24 hours)
-        recent_uploads = ledger.get_recent_upload_count(hours=24)
+        recent_uploads = ledger.get_recent_upload_count(hours=24, platform="youtube")
         print(f"\n[YouTubeUploader] 📊 24-Hour Rolling Upload Count: {recent_uploads}/{STUDIO_UPLOAD_SAFETY_CAP} permitted uploads.")
-        if not force and recent_uploads >= STUDIO_UPLOAD_SAFETY_CAP:
+        if not dry_run and not force and recent_uploads >= STUDIO_UPLOAD_SAFETY_CAP:
             print(f"[YouTubeUploader] 🛑 Safety Cap Reached: {STUDIO_UPLOAD_SAFETY_CAP} uploads already completed in the last 24 hours!")
             print("[YouTubeUploader] 💾 All clips are preserved safely in output/.\n")
             for c in clips:

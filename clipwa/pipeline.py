@@ -629,6 +629,7 @@ class ClipwaPipeline:
                         clips=ig_batch,
                         scheduled=scheduled,
                         max_per_day=max_per_day,
+                        force=force,
                         dry_run=dry_run,
                         auto_delete=False,
                         progress_callback=upload_cb,

@@ -111,13 +111,15 @@ class ScheduleLedger:
                     pass
         return sorted(result)
 
-    def get_recent_upload_count(self, hours: int = 24) -> int:
+    def get_recent_upload_count(self, hours: int = 24, platform: Optional[str] = None) -> int:
         """Count uploads performed in the last N hours to enforce rolling safety cap."""
         data = self.load()
         history = data.get("upload_history", [])
         cutoff = datetime.now() - timedelta(hours=hours)
         count = 0
         for h in history:
+            if platform and h.get("platform") != platform:
+                continue
             ts_str = h.get("uploaded_at")
             if ts_str:
                 try:
