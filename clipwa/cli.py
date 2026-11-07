@@ -172,6 +172,12 @@ def cli():
     default="openfilm",
     help="Rendering engine: openfilm or ffmpeg (default: openfilm).",
 )
+@click.option(
+    "--style",
+    "--style-ref",
+    default="forseth_ai",
+    help="OpenFilm visual style blueprint name or reference URL (default: forseth_ai).",
+)
 def process(
     url_or_file,
     max_clips,
@@ -189,6 +195,7 @@ def process(
     schedule,
     max_per_day,
     engine,
+    style,
 ):
     """Run full automated pipeline from URL/file to finished YouTube Shorts & Instagram Reels."""
     print_banner()
@@ -267,6 +274,7 @@ def process(
             dry_run_upload=dry_run_upload,
             engine=engine,
             progress_callback=callback,
+            style=style,
         )
 
     console.print("\n[bold green]Pipeline Execution Completed Successfully![/bold green]\n")
@@ -566,6 +574,20 @@ def upload_existing(platforms, privacy, summary, dry_run, no_title_upgrade, forc
         console.print(f"\n[bold green]✅ All existing clips processed across {platforms.upper()} successfully![/bold green]")
     except Exception as e:
         console.print(f"[bold red]Error uploading existing clips:[/bold red] {e}")
+
+
+@cli.command("clone-style")
+@click.argument("url", default="https://www.instagram.com/forseth.ai?utm_source=ig_web_button_share_sheet&exln=ZDNlZDc0MzIxNw==")
+@click.option("--name", default="forseth_ai", help="Style blueprint name (default: forseth_ai).")
+def clone_style_cmd(url, name):
+    """Clone visual editing style blueprint from an Instagram Reel or profile."""
+    print_banner()
+    console.print(f"[bold cyan]Cloning OpenFilm Style from:[/bold cyan] {url}")
+    from .style_cloner import StyleCloner
+    cloner = StyleCloner()
+    blueprint = cloner.clone_from_url(url=url, style_name=name)
+    console.print(f"[bold green]✓ Successfully cloned style '{name}'![/bold green]")
+    console.print(f"[dim]Font: {blueprint.get('font_family')} | Primary Accent: {blueprint.get('primary_accent_color')} | Pacing: {blueprint.get('pacing_cut_cadence_sec')}s[/dim]")
 
 
 def main():

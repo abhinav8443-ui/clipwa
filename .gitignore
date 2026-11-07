@@ -21,6 +21,7 @@ bin/*.exe
 temp/*
 !temp/.gitkeep
 temp/openfilm_projects/
+temp/style_ref/
 .film/
 output/*
 !output/.gitkeep

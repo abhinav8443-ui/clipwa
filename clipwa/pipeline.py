@@ -77,6 +77,7 @@ class ClipwaPipeline:
         platforms: str = "all",
         engine: str = "openfilm",
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        style: str = "forseth_ai",
     ) -> Dict[str, Any]:
         """
         Execute optimized two-stage pipeline:
@@ -285,6 +286,7 @@ class ClipwaPipeline:
                 words_data=clip_words_data.get("words", []),
                 hook_title=moment.get("youtube_title", "") or moment.get("hook_text", ""),
                 progress_callback=lambda d: notify("render_progress", f"Rendering clip {clip_num}...", d),
+                style=style,
             )
 
             clip_record: Dict[str, Any] = {

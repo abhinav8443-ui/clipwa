@@ -15,7 +15,7 @@ os.environ["ABSL_MIN_LOG_LEVEL"] = "3"
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -294,6 +294,7 @@ class VideoEditor:
         words_data: Optional[List[Dict[str, Any]]] = None,
         hook_title: Optional[str] = None,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        style: Union[str, Dict[str, Any], None] = "forseth_ai",
     ) -> str:
         """
         Cut, reframe into proper 9:16 YouTube Shorts vertical format (1080x1920)
@@ -349,6 +350,7 @@ class VideoEditor:
                     words_data=words_data,
                     bg_tune_path=bg_tune_path if bg_tune_path.exists() else None,
                     hook_sfx_path=hook_sfx_path if hook_sfx_path.exists() else None,
+                    style=style,
                 )
 
                 # 2. Automated Visual QA (openfilm look)

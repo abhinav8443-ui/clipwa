@@ -13,7 +13,7 @@ import subprocess
 import time
 import wave
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .config import Config
 
@@ -44,10 +44,13 @@ class OpenFilmEngine:
         temp_dir: Optional[Path] = None,
         output_dir: Optional[Path] = None,
         bin_dir: Optional[Path] = None,
+        styles_dir: Optional[Path] = None,
     ):
         self.temp_dir = Path(temp_dir or Config.TEMP_DIR)
         self.output_dir = Path(output_dir or Config.OUTPUT_DIR)
         self.bin_dir = Path(bin_dir or (Config.BASE_DIR / "bin"))
+        self.styles_dir = Path(styles_dir or (Config.BASE_DIR / "assets" / "styles"))
+        self.styles_dir.mkdir(parents=True, exist_ok=True)
         self.projects_dir = self.temp_dir / "openfilm_projects"
         self.projects_dir.mkdir(parents=True, exist_ok=True)
 
@@ -56,6 +59,31 @@ class OpenFilmEngine:
 
         # Locate openfilm executable
         self.openfilm_cmd = self._find_openfilm_cli()
+
+    def get_style(self, style: Union[str, Dict[str, Any], None] = "forseth_ai") -> Dict[str, Any]:
+        """Load and resolve an OpenFilm Style Blueprint by name or dictionary."""
+        from .style_cloner import FORSETH_AI_BLUEPRINT
+        if isinstance(style, dict):
+            merged = dict(FORSETH_AI_BLUEPRINT)
+            merged.update(style)
+            return merged
+
+        style_name = str(style or "forseth_ai").strip().lower()
+        candidates = [
+            self.styles_dir / f"{style_name}.json",
+            self.styles_dir / "forseth_ai.json",
+        ]
+        for c in candidates:
+            if c.exists():
+                try:
+                    data = json.loads(c.read_text(encoding="utf-8"))
+                    merged = dict(FORSETH_AI_BLUEPRINT)
+                    merged.update(data)
+                    return merged
+                except Exception as e:
+                    logger.warning(f"Error reading style blueprint {c}: {e}")
+
+        return dict(FORSETH_AI_BLUEPRINT)
 
     def _inject_bin_path(self) -> None:
         """Prepend local bin directory to os.environ['PATH']."""
@@ -209,6 +237,7 @@ class OpenFilmEngine:
         bg_tune_path: Optional[Path] = None,
         hook_sfx_path: Optional[Path] = None,
         font_size_px: int = 68,
+        style: Union[str, Dict[str, Any], None] = "forseth_ai",
     ) -> Path:
         """
         Build an OpenFilm project folder adhering strictly to the OpenFilm Protocol:
@@ -224,14 +253,17 @@ class OpenFilmEngine:
         assets_dir = project_dir / "assets"
         assets_dir.mkdir(parents=True, exist_ok=True)
 
+        style_data = self.get_style(style)
+
         # 1. Copy or link media assets into assets/
         src_video = Path(video_path).resolve()
         target_video = assets_dir / "clip.mp4"
-        try:
-            if not target_video.exists() or target_video.stat().st_size != src_video.stat().st_size:
-                shutil.copy2(src_video, target_video)
-        except Exception:
-            shutil.copyfile(src_video, target_video)
+        if src_video.resolve() != target_video.resolve():
+            try:
+                if not target_video.exists() or target_video.stat().st_size != src_video.stat().st_size:
+                    shutil.copy2(src_video, target_video)
+            except Exception:
+                shutil.copyfile(src_video, target_video)
         clip_actual_dur = self.probe_duration(target_video)
 
         has_hook_sfx = False
@@ -239,7 +271,8 @@ class OpenFilmEngine:
         if hook_sfx_path and Path(hook_sfx_path).exists():
             target_sfx = assets_dir / "hook_sfx.wav"
             try:
-                shutil.copyfile(hook_sfx_path, target_sfx)
+                if Path(hook_sfx_path).resolve() != target_sfx.resolve():
+                    shutil.copyfile(hook_sfx_path, target_sfx)
                 sfx_actual_dur = self.probe_duration(target_sfx)
                 has_hook_sfx = target_sfx.exists() and target_sfx.stat().st_size > 0
             except Exception:
@@ -277,7 +310,8 @@ class OpenFilmEngine:
                     )
                     shutil.move(str(tmp_bg), target_bg)
                 else:
-                    shutil.copyfile(bg_tune_path, target_bg)
+                    if Path(bg_tune_path).resolve() != target_bg.resolve():
+                        shutil.copyfile(bg_tune_path, target_bg)
 
                 bg_actual_dur = self.probe_duration(target_bg)
                 has_bg_music = target_bg.exists() and target_bg.stat().st_size > 0
@@ -302,6 +336,7 @@ class OpenFilmEngine:
             hook_title=clean_hook,
             phrases=phrases,
             font_size_px=font_size_px,
+            style_data=style_data,
         )
 
         # 5. Generate film.html (Multi-Track OpenFilm Stage)
@@ -313,9 +348,10 @@ class OpenFilmEngine:
             bg_actual_dur=bg_actual_dur,
             has_hook_sfx=has_hook_sfx,
             has_bg_music=has_bg_music,
+            style_data=style_data,
         )
 
-        logger.info(f"OpenFilm project generated at: {project_dir}")
+        logger.info(f"OpenFilm project generated at: {project_dir} (style: {style_data.get('style_name', 'forseth_ai')})")
         return project_dir
 
     def _write_film_html(
@@ -326,8 +362,26 @@ class OpenFilmEngine:
         bg_actual_dur: float,
         has_hook_sfx: bool,
         has_bg_music: bool,
+        style_data: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Write the multi-track film.html according to OpenFilm Protocol 0.1."""
+        sd = style_data or {}
+        cg = sd.get("color_grade", {})
+        fm = sd.get("framing_and_motion", {})
+
+        fg_filter = cg.get("css_filter", "contrast(1.14) saturate(1.15) brightness(0.95)")
+        bg_blur = cg.get("bg_blur_px", 38)
+        bg_bright = cg.get("bg_brightness", 0.36)
+        bg_sat = cg.get("bg_saturate", 1.18)
+        bg_scale = cg.get("bg_scale", 1.08)
+        fg_radius = fm.get("fg_border_radius_px", 18)
+        fg_shadow = fm.get("fg_box_shadow", "0 25px 60px rgba(0, 0, 0, 0.75)")
+        fg_top = fm.get("fg_video_top_px", 460)
+        fg_height = fm.get("fg_video_height_px", 1000)
+
+        # Subtle dynamic camera zoom on central video
+        fg_animation = "animation: cameraPunch 7.6s ease-in-out infinite;" if fm.get("camera_zoom_enabled", True) else ""
+
         # Clamp video duration strictly to actual file duration - 0.02s
         if clip_actual_dur > 0:
             v_end = min(duration, clip_actual_dur - 0.02)
@@ -363,15 +417,21 @@ class OpenFilmEngine:
       background: #000;
       overflow: hidden;
     }}
+    @keyframes cameraPunch {{
+      0%, 100% {{ scale: 1; }}
+      42%, 58% {{ scale: 1.055; }}
+    }}
     .bg-video {{
       object-fit: cover;
-      filter: blur(36px) brightness(0.38) saturate(1.15);
-      transform: scale(1.08);
+      filter: blur({bg_blur}px) brightness({bg_bright}) saturate({bg_sat});
+      scale: {bg_scale};
     }}
     .fg-video {{
       object-fit: contain;
-      border-radius: 18px;
-      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.7);
+      border-radius: {fg_radius}px;
+      box-shadow: {fg_shadow};
+      filter: {fg_filter};
+      {fg_animation}
     }}
   </style>
 </head>
@@ -384,7 +444,7 @@ class OpenFilmEngine:
   <!-- Track 2: Primary Foreground Video with Voice Audio (volume=1.0) -->
   <section>
     <video id="fg_video" src="assets/clip.mp4#t=0,{v_dur_str}" volume="1.0" class="fg-video"
-           style="left: 0; top: 460px; width: 1080px; height: 1000px"></video>
+           style="left: 0; top: {fg_top}px; width: 1080px; height: {fg_height}px"></video>
   </section>
 
   <!-- Track 3: Ambient Blurred Background Video (muted) -->
@@ -407,13 +467,46 @@ class OpenFilmEngine:
         hook_title: str,
         phrases: List[Dict[str, Any]],
         font_size_px: int,
+        style_data: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Write overlay.html containing deterministic frame(t) logic for:
         1. 3-Second Glassmorphic Hook Banner with cubic-bezier entrance/exit.
-        2. Pro Hormozi word-by-word kinetic typography with spring scale pops.
+        2. Pro kinetic typography with spring scale pops and contrast backing.
         3. Bottom neon progress bar + vignette + audio-reactive waveform indicators.
         """
+        sd = style_data or {}
+        cs = sd.get("caption_style", {})
+        cg = sd.get("color_grade", {})
+        va = sd.get("visual_accents", {})
+        hb = va.get("glassmorphic_hook_badge", {})
+        pb = va.get("progress_bar", {})
+
+        font_family = cs.get("font_family", "Montserrat, 'Plus Jakarta Sans', 'Inter', sans-serif")
+        font_sz = font_size_px or cs.get("font_size_px", 68)
+        color_default = cs.get("color_default", "#FFFFFF")
+        color_active = cs.get("color_active", "#FFE600")
+        color_power = cs.get("color_power", "#00FF66")
+        color_danger = cs.get("color_danger", "#FF3366")
+        active_scale = cs.get("active_word_scale", 1.16)
+        stroke_w = cs.get("stroke_width_px", 3.5)
+        stroke_color = cs.get("stroke_color", "#000000")
+        text_shadow = cs.get("text_shadow", "0 6px 18px rgba(0, 0, 0, 0.95), 0 0 28px rgba(0, 0, 0, 0.75)")
+        active_text_shadow = cs.get("active_text_shadow", "0 8px 24px rgba(0, 0, 0, 1), 0 0 32px rgba(255, 230, 0, 0.6)")
+
+        vignette_radial = cg.get("vignette_radial", "radial-gradient(ellipse at center, rgba(0,0,0,0) 56%, rgba(0,0,0,0.65) 100%)")
+        bottom_gradient = cg.get("bottom_contrast_gradient", "linear-gradient(to top, rgba(0,0,0,0.72) 0%, rgba(0,0,0,0.25) 28%, rgba(0,0,0,0) 55%)")
+
+        badge_text = hb.get("badge_text", "AI BLUEPRINT")
+        badge_bg = hb.get("badge_bg", "#FFE600")
+        badge_color = hb.get("badge_color", "#000000")
+        badge_card_bg = hb.get("card_bg", "rgba(18, 18, 24, 0.82)")
+        badge_card_border = hb.get("card_border", "1.5px solid rgba(255, 255, 255, 0.22)")
+        badge_dur = hb.get("display_duration_sec", 3.0)
+
+        progress_color = pb.get("color", "linear-gradient(90deg, #FFE600 0%, #00FF66 100%)")
+        progress_glow = pb.get("glow", "0 0 14px rgba(255, 230, 0, 0.7)")
+
         phrases_json = json.dumps(phrases, ensure_ascii=False)
         power_words_json = json.dumps(list(POWER_WORDS))
         danger_words_json = json.dumps(list(DANGER_WORDS))
@@ -433,7 +526,7 @@ class OpenFilmEngine:
       height: 1920px;
       overflow: hidden;
       background: transparent;
-      font-family: 'Montserrat', 'Impact', 'Arial Black', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: {font_family};
       color: #FFFFFF;
       position: relative;
     }}
@@ -445,9 +538,21 @@ class OpenFilmEngine:
       left: 0;
       width: 1080px;
       height: 1920px;
-      background: radial-gradient(ellipse at center, rgba(0,0,0,0) 62%, rgba(0,0,0,0.45) 100%);
+      background: {vignette_radial};
       pointer-events: none;
       z-index: 1;
+    }}
+
+    /* Bottom 35% Smooth Contrast Gradient for 100% Subtitle Legibility */
+    #bottom-contrast {{
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: 1080px;
+      height: 860px;
+      background: {bottom_gradient};
+      pointer-events: none;
+      z-index: 2;
     }}
 
     /* 3-Second Viral Hook Banner (Safe Zone: top 210px) */
@@ -457,12 +562,12 @@ class OpenFilmEngine:
       left: 60px;
       width: 960px;
       padding: 24px 30px;
-      background: rgba(18, 18, 24, 0.78);
+      background: {badge_card_bg};
       backdrop-filter: blur(24px);
       -webkit-backdrop-filter: blur(24px);
       border-radius: 24px;
-      border: 1.5px solid rgba(255, 255, 255, 0.22);
-      box-shadow: 0 16px 45px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+      border: {badge_card_border};
+      box-shadow: 0 16px 45px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.2);
       text-align: center;
       font-size: 38px;
       font-weight: 900;
@@ -479,8 +584,8 @@ class OpenFilmEngine:
       display: inline-block;
       font-size: 19px;
       font-weight: 800;
-      background: #FFE600;
-      color: #000;
+      background: {badge_bg};
+      color: {badge_color};
       padding: 4px 14px;
       border-radius: 12px;
       margin-bottom: 8px;
@@ -501,37 +606,38 @@ class OpenFilmEngine:
       gap: 16px 20px;
       text-align: center;
       z-index: 20;
+      transition: transform 0.08s ease-out;
     }}
 
     .word {{
       display: inline-block;
-      font-size: {font_size_px}px;
+      font-size: {font_sz}px;
       font-weight: 900;
       text-transform: uppercase;
       line-height: 1.1;
       letter-spacing: 0.5px;
-      color: #FFFFFF;
-      -webkit-text-stroke: 3.5px #000000;
-      text-shadow: 0 6px 16px rgba(0, 0, 0, 0.95), 0 0 24px rgba(0, 0, 0, 0.7);
+      color: {color_default};
+      -webkit-text-stroke: {stroke_w}px {stroke_color};
+      text-shadow: {text_shadow};
       transition: none;
       transform-origin: center center;
     }}
 
     /* Active Highlighted Word with Spring Physics */
     .word.active {{
-      color: #FFE600;
-      transform: scale(1.18);
+      color: {color_active};
+      transform: scale({active_scale});
       -webkit-text-stroke: 4px #000000;
-      text-shadow: 0 8px 24px rgba(0, 0, 0, 1), 0 0 30px rgba(255, 230, 0, 0.5);
+      text-shadow: {active_text_shadow};
     }}
 
     .word.active.power {{
-      color: #00FF66 !important;
+      color: {color_power} !important;
       text-shadow: 0 8px 24px rgba(0, 0, 0, 1), 0 0 30px rgba(0, 255, 102, 0.6) !important;
     }}
 
     .word.active.danger {{
-      color: #FF3366 !important;
+      color: {color_danger} !important;
       text-shadow: 0 8px 24px rgba(0, 0, 0, 1), 0 0 30px rgba(255, 51, 102, 0.6) !important;
     }}
 
@@ -550,9 +656,9 @@ class OpenFilmEngine:
     #progress-fill {{
       height: 100%;
       width: 0%;
-      background: #FFE600;
+      background: {progress_color};
       border-radius: 4px;
-      box-shadow: 0 0 14px #FFE600;
+      box-shadow: {progress_glow};
     }}
 
     /* Dynamic Audio-Reactive Waveform Indicator */
@@ -569,7 +675,7 @@ class OpenFilmEngine:
     }}
     .wave-stick {{
       width: 5px;
-      background: #FFE600;
+      background: {color_active};
       border-radius: 3px;
       height: 6px;
       box-shadow: 0 0 8px rgba(255, 230, 0, 0.6);
@@ -578,10 +684,11 @@ class OpenFilmEngine:
 </head>
 <body>
   <div id="vignette"></div>
+  <div id="bottom-contrast"></div>
 
   <!-- 3-Second Viral Hook Banner -->
   <div id="hook-banner">
-    <div id="hook-badge">VIRAL HOOK</div><br>
+    <div id="hook-badge">{badge_text}</div><br>
     <span id="hook-text">{hook_title}</span>
   </div>
 
@@ -607,6 +714,7 @@ class OpenFilmEngine:
     const phrases = {phrases_json};
     const powerWords = new Set({power_words_json});
     const dangerWords = new Set({danger_words_json});
+    const BADGE_DUR = {badge_dur};
 
     const banner = document.getElementById('hook-banner');
     const subContainer = document.getElementById('subtitles-container');
@@ -622,7 +730,6 @@ class OpenFilmEngine:
     let cachedPhraseIdx = -1;
 
     function cubicBezier(t) {{
-      // Smooth cubic-bezier(0.16, 1, 0.3, 1) approximation
       return 1 - Math.pow(1 - t, 3);
     }}
 
@@ -636,18 +743,19 @@ class OpenFilmEngine:
       width: 1080,
       height: 1920,
       frame(t) {{
-        // 1. Hook Banner Animation (0.0s to 2.8s)
+        // 1. Hook Banner Animation (0.0s to BADGE_DUR)
+        const exitStart = Math.max(1.8, BADGE_DUR - 0.45);
         if (t < 0.42) {{
           const p = cubicBezier(t / 0.42);
           banner.style.display = 'block';
           banner.style.opacity = p;
           banner.style.transform = `translateY(${{(1 - p) * -38}}px) scale(${{0.92 + 0.08 * p}})`;
-        }} else if (t < 2.40) {{
+        }} else if (t < exitStart) {{
           banner.style.display = 'block';
           banner.style.opacity = 1;
           banner.style.transform = 'translateY(0) scale(1)';
-        }} else if (t < 2.80) {{
-          const p = cubicBezier((t - 2.40) / 0.40);
+        }} else if (t < BADGE_DUR) {{
+          const p = cubicBezier((t - exitStart) / (BADGE_DUR - exitStart));
           banner.style.display = 'block';
           banner.style.opacity = 1 - p;
           banner.style.transform = `translateY(${{-p * 36}}px) scale(${{1 - 0.08 * p}})`;
@@ -655,7 +763,7 @@ class OpenFilmEngine:
           banner.style.display = 'none';
         }}
 
-        // 2. Hormozi Kinetic Typography
+        // 2. Pro Kinetic Typography
         let currentPhrase = null;
         let currentPhraseIdx = -1;
         for (let i = 0; i < phrases.length; i++) {{
@@ -675,6 +783,8 @@ class OpenFilmEngine:
           if (cachedPhraseIdx !== currentPhraseIdx) {{
             cachedPhraseIdx = currentPhraseIdx;
             subContainer.innerHTML = '';
+            // Micro-rhythm pulse on phrase transition
+            subContainer.style.transform = 'scale(1.025)';
             currentPhrase.words.forEach((w, wIdx) => {{
               const span = document.createElement('span');
               span.className = 'word';
@@ -682,6 +792,8 @@ class OpenFilmEngine:
               span.textContent = w.word;
               subContainer.appendChild(span);
             }});
+          }} else {{
+            subContainer.style.transform = 'scale(1.0)';
           }}
 
           // Apply kinetic highlight and spring scale to active spoken word
