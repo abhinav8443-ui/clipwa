@@ -380,7 +380,7 @@ class OpenFilmEngine:
         fg_height = fm.get("fg_video_height_px", 1000)
 
         # Subtle dynamic camera zoom on central video
-        fg_animation = "animation: cameraPunch 7.6s ease-in-out infinite;" if fm.get("camera_zoom_enabled", True) else ""
+        fg_animation = "animation: cameraPunch 4.2s cubic-bezier(0.22, 1, 0.36, 1) infinite;" if fm.get("camera_zoom_enabled", True) else ""
 
         # Clamp video duration strictly to actual file duration - 0.02s
         if clip_actual_dur > 0:
@@ -419,7 +419,7 @@ class OpenFilmEngine:
     }}
     @keyframes cameraPunch {{
       0%, 100% {{ scale: 1; }}
-      42%, 58% {{ scale: 1.055; }}
+      42%, 58% {{ scale: 1.10; }}
     }}
     .bg-video {{
       object-fit: cover;
@@ -592,10 +592,23 @@ class OpenFilmEngine:
       letter-spacing: 1.5px;
     }}
 
-    /* Pro Hormozi Kinetic Subtitles Safe Box (Central 9:16 safe area: 54% - 66%) */
+    /* Subtle Cinematic Film Grain Overlay */
+    #film-grain {{
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 1080px;
+      height: 1920px;
+      pointer-events: none;
+      z-index: 3;
+      opacity: 0.04;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+    }}
+
+    /* Pro Hormozi Kinetic Subtitles Safe Box (Lower-Middle safe area: ~64% safe zone) */
     #subtitles-container {{
       position: absolute;
-      top: 1060px;
+      top: 1220px;
       left: 60px;
       width: 960px;
       min-height: 160px;
@@ -615,7 +628,7 @@ class OpenFilmEngine:
       font-weight: 900;
       text-transform: uppercase;
       line-height: 1.1;
-      letter-spacing: 0.5px;
+      letter-spacing: -0.03em;
       color: {color_default};
       -webkit-text-stroke: {stroke_w}px {stroke_color};
       text-shadow: {text_shadow};
@@ -647,7 +660,7 @@ class OpenFilmEngine:
       bottom: 34px;
       left: 60px;
       width: 960px;
-      height: 8px;
+      height: 6px;
       background: rgba(255, 255, 255, 0.18);
       border-radius: 4px;
       overflow: hidden;
@@ -685,6 +698,7 @@ class OpenFilmEngine:
 <body>
   <div id="vignette"></div>
   <div id="bottom-contrast"></div>
+  <div id="film-grain"></div>
 
   <!-- 3-Second Viral Hook Banner -->
   <div id="hook-banner">
@@ -783,8 +797,6 @@ class OpenFilmEngine:
           if (cachedPhraseIdx !== currentPhraseIdx) {{
             cachedPhraseIdx = currentPhraseIdx;
             subContainer.innerHTML = '';
-            // Micro-rhythm pulse on phrase transition
-            subContainer.style.transform = 'scale(1.025)';
             currentPhrase.words.forEach((w, wIdx) => {{
               const span = document.createElement('span');
               span.className = 'word';
@@ -792,8 +804,17 @@ class OpenFilmEngine:
               span.textContent = w.word;
               subContainer.appendChild(span);
             }});
+          }}
+
+          // Sentence cut micro-spring pop & pulse
+          const phraseAge = t - currentPhrase.start;
+          if (phraseAge >= 0 && phraseAge < 0.22) {{
+            const p = phraseAge / 0.22;
+            const popScale = 1.06 - 0.06 * p;
+            const popY = (1 - p) * -8;
+            subContainer.style.transform = `translateY(${{popY.toFixed(1)}}px) scale(${{popScale.toFixed(3)}})`;
           }} else {{
-            subContainer.style.transform = 'scale(1.0)';
+            subContainer.style.transform = 'translateY(0) scale(1.0)';
           }}
 
           // Apply kinetic highlight and spring scale to active spoken word
