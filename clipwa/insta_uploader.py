@@ -51,6 +51,11 @@ class DailyInstaLimitError(Exception):
 class InstagramReelsUploader:
     """Manages Instagram Reels authentication and automated uploads via Playwright."""
 
+    DESKTOP_USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
+
     def __init__(
         self,
         user_data_dir: Optional[Path] = None,
@@ -79,6 +84,7 @@ class InstagramReelsUploader:
             headless=headless,
             args=browser_args,
             ignore_default_args=["--enable-automation"],
+            user_agent=self.DESKTOP_USER_AGENT,
             viewport=None,
         )
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -210,10 +216,34 @@ class InstagramReelsUploader:
             except Exception:
                 pass
 
+    def _auto_fill_credentials_if_available(self, page) -> bool:
+        """Auto-fills credentials if INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD are in environment."""
+        ig_user = os.getenv("INSTAGRAM_USERNAME") or os.getenv("IG_USERNAME")
+        ig_pass = os.getenv("INSTAGRAM_PASSWORD") or os.getenv("IG_PASSWORD")
+        if not ig_user or not ig_pass:
+            return False
+
+        try:
+            user_input = page.locator("input[name='username'], input[name='email'], input[aria-label*='username' i]").first
+            pass_input = page.locator("input[name='password'], input[name='pass'], input[aria-label*='password' i]").first
+            if user_input.is_visible() and pass_input.is_visible():
+                print("[InstagramUploader] Auto-filling credentials from environment...")
+                human_type(page, user_input, ig_user, clear_first=True, pause_after=0.8)
+                human_type(page, pass_input, ig_pass, clear_first=True, pause_after=1.0)
+                login_btn = page.locator("button[type='submit'], input[type='submit'], button:has-text('Log In'), button:has-text('Log in')").first
+                if login_btn.is_visible():
+                    login_btn.click()
+                    print("[InstagramUploader] Clicked Log In button, awaiting session...")
+                    page.wait_for_timeout(4000)
+                    return True
+        except Exception as e:
+            print(f"[InstagramUploader] Auto-login notice: {e}")
+        return False
+
     def is_logged_in(self, page, context=None) -> bool:
         """Check if Instagram account is currently logged in."""
         try:
-            if page.locator("input[name='username']").first.is_visible():
+            if page.locator("input[name='username'], input[name='email']").first.is_visible():
                 return False
         except Exception:
             pass
@@ -270,6 +300,7 @@ class InstagramReelsUploader:
             print("[InstagramUploader] Navigating to https://www.instagram.com/ ...")
             try:
                 page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
+                page.bring_to_front()
             except Exception:
                 pass
 
@@ -286,6 +317,9 @@ class InstagramReelsUploader:
                 context.close()
                 return True
 
+            # Attempt auto-login if credentials exist in env
+            self._auto_fill_credentials_if_available(page)
+
             print("\n=======================================================")
             print(" 🔑 ACTION REQUIRED: Please log in to Instagram in the browser window.")
             print(f" Waiting up to {timeout_sec} seconds (5 minutes) for login & 2FA...")
@@ -294,6 +328,7 @@ class InstagramReelsUploader:
 
             start_t = time.time()
             logged_in = False
+            last_prompt = start_t
             while time.time() - start_t < timeout_sec:
                 self._dismiss_modals(page, auto_save_info=True)
                 cookies = context.cookies("https://www.instagram.com")
@@ -301,6 +336,12 @@ class InstagramReelsUploader:
                 if self.is_logged_in(page) and has_sessionid:
                     logged_in = True
                     break
+
+                if time.time() - last_prompt > 25:
+                    rem = int(timeout_sec - (time.time() - start_t))
+                    print(f"[InstagramUploader] Waiting for Instagram login... ({rem}s remaining)")
+                    last_prompt = time.time()
+
                 page.wait_for_timeout(2000)
 
             if logged_in:
@@ -756,6 +797,7 @@ class InstagramReelsUploader:
             print("[InstagramUploader] Navigating to Instagram...")
             try:
                 page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
+                page.bring_to_front()
             except Exception:
                 pass
 
@@ -782,6 +824,10 @@ class InstagramReelsUploader:
                         logged_in = self.is_logged_in(page) and has_sessionid
                 except Exception as e:
                     print(f"[InstagramUploader] Notice reloading state: {e}")
+
+            if not logged_in:
+                # Attempt auto-login if credentials exist in env
+                self._auto_fill_credentials_if_available(page)
 
             if not logged_in:
                 print("\n" + "=" * 75)
