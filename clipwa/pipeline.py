@@ -497,6 +497,7 @@ class ClipwaPipeline:
         force: bool = False,
         dry_run: bool = False,
         progress_callback: Optional[Callable[[str, str, Optional[Dict[str, Any]]], None]] = None,
+        headless: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """
         Uploads clips that were already generated in the output directory.
@@ -633,6 +634,7 @@ class ClipwaPipeline:
                         dry_run=dry_run,
                         auto_delete=False,
                         progress_callback=upload_cb,
+                        headless=headless,
                     )
                 except Exception as e:
                     notify("upload_error", f"Instagram upload notice: {e}")

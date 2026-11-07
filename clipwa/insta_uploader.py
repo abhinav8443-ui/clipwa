@@ -493,6 +493,9 @@ class InstagramReelsUploader:
 
         # If sub-menu pops up with "Post" vs "Live video", click "Post"
         for sub_sel in [
+            "svg[aria-label='Post']",
+            "div[role='button']:has(svg[aria-label='Post'])",
+            "div:has(> svg[aria-label='Post'])",
             "span:has-text('Post')",
             "div[role='button']:has-text('Post')",
             "div[role='menuitem']:has-text('Post')",
@@ -529,50 +532,35 @@ class InstagramReelsUploader:
             except Exception:
                 pass
 
-        # 5. Aspect Ratio: Enforce 9:16 (Zero-Crop Vertical Reel)
-        try:
-            crop_btn = page.locator(
-                "svg[aria-label='Select crop'], button:has(svg[aria-label='Select crop']), [aria-label*='crop' i], div[role='button']:has(svg[aria-label='Select crop'])"
+        # 5. Advance through modal steps (Crop -> Filter/Cover -> Details/Caption)
+        print("[InstagramUploader] Advancing through video edit/filter screens to Caption...")
+        for step in range(5):
+            caption_box = page.locator(
+                "div[role='dialog'] div[aria-label*='Write a caption' i], "
+                "div[role='dialog'] div[aria-label*='caption' i][contenteditable='true'], "
+                "div[role='dialog'] div[role='textbox'], "
+                "div[aria-label*='Write a caption' i]"
             ).first
-            if crop_btn.is_visible():
-                crop_btn.click(force=True)
-                page.wait_for_timeout(800)
+            if caption_box.is_visible():
+                print(f"[InstagramUploader] Arrived at Caption screen at step {step + 1}!")
+                break
 
-                for r_sel in [
-                    "button:has-text('9:16')",
-                    "div[role='button']:has-text('9:16')",
-                    "span:has-text('9:16')",
-                    "button:has-text('Original')",
-                    "span:has-text('Original')",
-                ]:
-                    try:
-                        r_btn = page.locator(r_sel).first
-                        if r_btn.is_visible():
-                            r_btn.click(force=True)
-                            print("[InstagramUploader] Enforced 9:16 vertical Reel aspect ratio.")
-                            page.wait_for_timeout(800)
-                            break
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"[InstagramUploader] Aspect ratio notice: {e}")
-
-        # 6. Click 'Next' (top right of modal) -> Filters/Cover screen
-        next_btn = page.locator("div[role='button']:has-text('Next'), button:has-text('Next')").first
-        next_btn.wait_for(state="visible", timeout=15000)
-        next_btn.click(force=True)
-        page.wait_for_timeout(2500)
-
-        # 7. Click 'Next' again -> Details / Caption screen
-        next_btn2 = page.locator("div[role='button']:has-text('Next'), button:has-text('Next')").first
-        if next_btn2.is_visible():
-            next_btn2.click(force=True)
-            page.wait_for_timeout(2500)
+            next_btn = page.locator(
+                "div[role='dialog'] div[role='button']:has-text('Next'), "
+                "div[role='dialog'] button:has-text('Next'), "
+                "div[role='button']:has-text('Next')"
+            ).first
+            if next_btn.is_visible():
+                print(f"[InstagramUploader] Clicking Next (step {step + 1})...")
+                next_btn.click(force=True)
+                page.wait_for_timeout(3000)
+            else:
+                page.wait_for_timeout(1500)
 
         # 8. Fill Caption with stealth typing
         print(f"[InstagramUploader] Entering caption and hashtags for '{title}'...")
         caption_box = page.locator(
-            "div[aria-label*='Write a caption' i], div[aria-label*='caption' i][contenteditable='true'], div[role='textbox']"
+            "div[role='dialog'] div[aria-label*='Write a caption' i], div[role='dialog'] div[aria-label*='caption' i][contenteditable='true'], div[role='dialog'] div[role='textbox'], div[aria-label*='Write a caption' i]"
         ).first
         caption_box.wait_for(state="visible", timeout=15000)
         human_sleep(1.0, 1.5)
@@ -626,8 +614,8 @@ class InstagramReelsUploader:
             progress_callback({"stage": "upload_progress", "percent": 50, "message": f"{action_verb}ing Reel to Instagram..."})
 
         submit_btn = page.locator(
-            f"div[role='button']:has-text('{action_verb}'), button:has-text('{action_verb}'), "
-            "div[role='button']:has-text('Share'), button:has-text('Share')"
+            f"div[role='dialog'] div[role='button']:has-text('{action_verb}'), div[role='dialog'] button:has-text('{action_verb}'), "
+            "div[role='dialog'] div[role='button']:has-text('Share'), div[role='dialog'] button:has-text('Share')"
         ).first
         submit_btn.wait_for(state="visible", timeout=15000)
         submit_btn.click(force=True)
@@ -721,6 +709,7 @@ class InstagramReelsUploader:
         dry_run: bool = False,
         auto_delete: bool = False,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        headless: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """
         Uploads multiple vertical clips to Instagram Reels sequentially within the SAME browser session.
@@ -778,8 +767,11 @@ class InstagramReelsUploader:
 
         self._unlock_profile()
 
+        if headless is None:
+            headless = os.environ.get("CLIPWA_HEADLESS", "").lower() in ("1", "true", "yes")
+
         with sync_playwright() as p:
-            context = self._create_stealth_context(p, headless=False)
+            context = self._create_stealth_context(p, headless=headless)
             page = context.pages[0] if context.pages else context.new_page()
             page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 

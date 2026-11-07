@@ -518,7 +518,8 @@ def login_insta_cmd(timeout):
     type=click.IntRange(1, 4),
     help="Maximum scheduled Shorts per day (default: 2).",
 )
-def upload_existing(platforms, privacy, summary, dry_run, no_title_upgrade, force, schedule, max_per_day):
+@click.option("--headless/--headed", default=None, help="Run browser in headless or headed mode (default: autodetect).")
+def upload_existing(platforms, privacy, summary, dry_run, no_title_upgrade, force, schedule, max_per_day, headless):
     """Upload previously generated clips from output/ to YouTube Shorts and/or Instagram Reels."""
     print_banner()
     pipeline = ClipwaPipeline()
@@ -545,6 +546,7 @@ def upload_existing(platforms, privacy, summary, dry_run, no_title_upgrade, forc
             force=force,
             dry_run=dry_run,
             progress_callback=on_progress,
+            headless=headless,
         )
 
         table = Table(title="Shorts & Reels Dual Upload Status", show_header=True, header_style="bold magenta")
