@@ -7,7 +7,7 @@ __pycache__/
 build/
 dist/
 
-# Audio files & custom tracks
+# Audio files & custom tracks (NEVER commit to Git)
 assets/audio/custom_tracks/
 assets/audio/*.wav
 assets/audio/*.mp3
@@ -17,9 +17,11 @@ assets/audio/*.m4a
 bin/*.exe
 !bin/.gitkeep
 
-# Temporary and output directories
+# Temporary, OpenFilm, and output directories
 temp/*
 !temp/.gitkeep
+temp/openfilm_projects/
+.film/
 output/*
 !output/.gitkeep
 

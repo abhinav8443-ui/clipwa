@@ -51,7 +51,7 @@ class ScheduleLedger:
     """Manages the persistent schedule ledger in output/schedule_ledger.json."""
 
     def __init__(self, ledger_path: Optional[Path] = None):
-        self.ledger_path = ledger_path or (Config.OUTPUT_DIR / "schedule_ledger.json")
+        self.ledger_path = Path(ledger_path) if ledger_path else (Config.OUTPUT_DIR / "schedule_ledger.json")
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
 
     def load(self) -> Dict[str, Any]:

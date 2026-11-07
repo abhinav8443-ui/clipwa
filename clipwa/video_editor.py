@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 
 from .config import Config
+from .openfilm_engine import OpenFilmEngine
 
 logger = logging.getLogger("clipwa.video_editor")
 
@@ -53,6 +54,11 @@ class VideoEditor:
         self._mp_detector = None
         self._cv_cascade = None
         self._has_nvenc = None
+        self.openfilm = OpenFilmEngine(
+            temp_dir=self.temp_dir,
+            output_dir=self.output_dir,
+            bin_dir=Config.BASE_DIR / "bin",
+        )
 
     def _supports_nvenc(self) -> bool:
         """Check if NVIDIA NVENC hardware encoder is functional."""
@@ -284,6 +290,9 @@ class VideoEditor:
         subtitle_ass_path: Optional[str] = None,
         layout_mode: str = "9:16",
         clip_index: int = 1,
+        engine: str = "openfilm",
+        words_data: Optional[List[Dict[str, Any]]] = None,
+        hook_title: Optional[str] = None,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> str:
         """
@@ -301,6 +310,76 @@ class VideoEditor:
         output_path = str(self.output_dir / output_filename)
         duration = end_time - start_time
 
+        # Attempt 1: Professional OpenFilm HTML5/Canvas Motion-Graphics Engine
+        if engine.lower() == "openfilm" and self.openfilm.is_available():
+            try:
+                print(f"[VideoEditor] 🎬 Rendering Clip [{clip_index}] via OpenFilm Motion-Graphics Engine (1080x1920)...")
+                logger.info(f"Rendering clip {clip_index} with OpenFilm engine...")
+
+                target_video_for_openfilm = video_path
+                if start_time > 0.05:
+                    temp_slice = str(self.temp_dir / f"openfilm_slice_{clip_index}_{int(start_time)}_{int(end_time)}.mp4")
+                    slice_cmd = [
+                        self.ffmpeg_path, "-y",
+                        "-ss", f"{start_time:.3f}",
+                        "-t", f"{duration:.3f}",
+                        "-i", video_path,
+                        "-c", "copy",
+                        temp_slice,
+                    ]
+                    subprocess.run(slice_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    target_video_for_openfilm = temp_slice
+
+                # Rotated background music from 5-track viral music pool
+                custom_tracks_dir = Config.BASE_DIR / "assets" / "audio" / "custom_tracks"
+                custom_tracks = sorted(list(custom_tracks_dir.glob("*.wav"))) if custom_tracks_dir.exists() else []
+                if custom_tracks:
+                    bg_tune_path = custom_tracks[(clip_index - 1) % len(custom_tracks)]
+                else:
+                    bg_tune_path = Config.BASE_DIR / "assets" / "audio" / "bg_tune.wav"
+
+                hook_sfx_path = Config.BASE_DIR / "assets" / "audio" / "hook_sfx.wav"
+
+                # 1. Build structured OpenFilm project folder
+                proj_dir = self.openfilm.build_project(
+                    clip_id=clip_index,
+                    video_path=target_video_for_openfilm,
+                    duration=duration,
+                    hook_title=hook_title or output_filename,
+                    words_data=words_data,
+                    bg_tune_path=bg_tune_path if bg_tune_path.exists() else None,
+                    hook_sfx_path=hook_sfx_path if hook_sfx_path.exists() else None,
+                )
+
+                # 2. Automated Visual QA (openfilm look)
+                if progress_callback:
+                    progress_callback({"stage": "render_progress", "percent": 5, "message": "Visual QA check (openfilm look)..."})
+                look_res = self.openfilm.look(proj_dir)
+                if look_res.get("ok"):
+                    logger.info(f"OpenFilm visual QA passed for clip {clip_index}")
+                else:
+                    logger.warning(f"OpenFilm look notice: {look_res.get('output', '')[:200]}")
+
+                # 3. Parallel Hardware NVENC Render (openfilm render)
+                out_path_obj = Path(output_path)
+                self.openfilm.render(
+                    project_dir=proj_dir,
+                    output_mp4=out_path_obj,
+                    fps=30,
+                    progress_callback=progress_callback,
+                )
+
+                if out_path_obj.exists() and out_path_obj.stat().st_size > 0:
+                    print(f"[VideoEditor] ✅ OpenFilm render succeeded: {output_path}")
+                    return output_path
+                else:
+                    raise RuntimeError("OpenFilm render output file is missing or empty.")
+
+            except Exception as e:
+                print(f"[VideoEditor] ⚠️ OpenFilm render notice: {e}. Falling back to enhanced FFmpeg engine...")
+                logger.warning(f"OpenFilm fallback triggered: {e}", exc_info=True)
+
+        # Attempt 2: Enhanced FFmpeg Fallback Engine
         # Target 9:16 canvas setup (1080x1920) for YouTube Shorts
         canvas_w = Config.TARGET_WIDTH   # 1080
         canvas_h = Config.TARGET_HEIGHT  # 1920

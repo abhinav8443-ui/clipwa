@@ -166,6 +166,12 @@ def cli():
     type=click.IntRange(1, 4),
     help="Maximum scheduled Shorts per day (default: 2).",
 )
+@click.option(
+    "--engine",
+    type=click.Choice(["openfilm", "ffmpeg"], case_sensitive=False),
+    default="openfilm",
+    help="Rendering engine: openfilm or ffmpeg (default: openfilm).",
+)
 def process(
     url_or_file,
     max_clips,
@@ -182,6 +188,7 @@ def process(
     dry_run_upload,
     schedule,
     max_per_day,
+    engine,
 ):
     """Run full automated pipeline from URL/file to finished YouTube Shorts & Instagram Reels."""
     print_banner()
@@ -258,6 +265,7 @@ def process(
             scheduled=schedule,
             max_per_day=max_per_day,
             dry_run_upload=dry_run_upload,
+            engine=engine,
             progress_callback=callback,
         )
 
@@ -400,6 +408,17 @@ def upload(video_file, title, description, privacy, dry_run):
     console.print(f"[green]Upload Status:[/green] {res.get('status')}")
     if res.get("url"):
         console.print(f"[bold cyan]Short URL:[/bold cyan] {res.get('url')}")
+
+
+@cli.command(name="studio")
+@click.argument("clip_folder", required=False, default=None)
+def studio_cmd(clip_folder):
+    """Launch OpenFilm Studio in browser for interactive preview and timeline editing."""
+    print_banner()
+    from .openfilm_engine import OpenFilmEngine
+    engine = OpenFilmEngine()
+    target_dir = Path(clip_folder) if clip_folder else None
+    engine.open_studio(target_dir)
 
 
 @cli.command()
