@@ -1,7 +1,7 @@
 """
 Automated Instagram Reels uploader using Playwright browser automation.
-Uses the persistent profile directory (youtube_auth_profile) so user login sessions
-persist seamlessly across runs without credential re-entry.
+Uses the persistent profile directory (youtube_auth_profile) and insta_state.json
+so user login sessions persist seamlessly across runs without credential re-entry.
 """
 
 from datetime import datetime
@@ -59,8 +59,30 @@ class InstagramReelsUploader:
     ):
         self.user_data_dir = user_data_dir or (Config.BASE_DIR / "youtube_auth_profile")
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
+        self.state_file = self.user_data_dir / "insta_state.json"
         self.output_dir = output_dir or Config.OUTPUT_DIR
         self.temp_dir = temp_dir or Config.TEMP_DIR
+
+    def _create_stealth_context(self, p, headless: bool = False):
+        """
+        Creates a stealth persistent browser context undetected by Instagram automation filters.
+        Injects navigator.webdriver bypass on every frame and new tab.
+        """
+        browser_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--start-maximized",
+            "--no-sandbox",
+            "--disable-infobars",
+        ]
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=str(self.user_data_dir.resolve()),
+            headless=headless,
+            args=browser_args,
+            ignore_default_args=["--enable-automation"],
+            viewport=None,
+        )
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        return context
 
     def _sync_summary_clip(self, clip_record: Dict[str, Any]) -> None:
         """Updates pipeline_summary.json on disk with the latest clip Instagram status."""
@@ -140,40 +162,63 @@ class InstagramReelsUploader:
                 except Exception:
                     pass
 
-    def _dismiss_modals(self, page) -> None:
+    def _dismiss_modals(self, page, auto_save_info: bool = True) -> None:
         """Dismiss common Instagram popups (Save info, Notifications, Cookies)."""
-        # Save login info modal
-        for sel in [
-            "button:has-text('Save info')",
-            "button:has-text('Save Info')",
-            "button:has-text('Not now')",
-            "button:has-text('Not Now')",
-            "div[role='button']:has-text('Not now')",
+        # 1. Cookie consent
+        for c_sel in [
+            "button:has-text('Allow all cookies')",
+            "button:has-text('Allow essential and optional cookies')",
+            "button:has-text('Only allow essential cookies')",
+            "button:has-text('Decline optional cookies')",
         ]:
             try:
-                btn = page.locator(sel).first
-                if btn.is_visible():
-                    btn.click()
-                    page.wait_for_timeout(800)
+                c_btn = page.locator(c_sel).first
+                if c_btn.is_visible():
+                    c_btn.click()
+                    page.wait_for_timeout(600)
             except Exception:
                 pass
 
-        # Notifications modal
-        for sel in [
+        # 2. Save login info modal
+        if auto_save_info:
+            for s_sel in [
+                "button:has-text('Save info')",
+                "div[role='button']:has-text('Save info')",
+                "button:has-text('Save Info')",
+                "button:has-text('Save your login info?')",
+            ]:
+                try:
+                    s_btn = page.locator(s_sel).first
+                    if s_btn.is_visible():
+                        s_btn.click()
+                        page.wait_for_timeout(800)
+                except Exception:
+                    pass
+
+        # 3. Notifications modal
+        for n_sel in [
             "button:has-text('Not Now')",
             "button:has-text('Not now')",
+            "div[role='button']:has-text('Not now')",
             "button:has-text('Cancel')",
         ]:
             try:
-                btn = page.locator(sel).first
-                if btn.is_visible():
-                    btn.click()
-                    page.wait_for_timeout(800)
+                n_btn = page.locator(n_sel).first
+                if n_btn.is_visible():
+                    n_btn.click()
+                    page.wait_for_timeout(600)
             except Exception:
                 pass
 
-    def is_logged_in(self, page) -> bool:
+    def is_logged_in(self, page, context=None) -> bool:
         """Check if Instagram account is currently logged in."""
+        try:
+            if page.locator("input[name='username']").first.is_visible():
+                return False
+        except Exception:
+            pass
+
+        has_element = False
         for sel in [
             "svg[aria-label='New post']",
             "svg[aria-label='Create']",
@@ -182,19 +227,32 @@ class InstagramReelsUploader:
             "svg[aria-label='Home']",
             "svg[aria-label='Direct']",
             "svg[aria-label='Messages']",
+            "a[href*='/direct/']",
+            "a[href*='/explore/']",
             "a[href*='/']:has(img[alt*='profile picture'])",
         ]:
             try:
                 if page.locator(sel).first.is_visible():
-                    return True
+                    has_element = True
+                    break
             except Exception:
                 pass
-        return False
+
+        if context is not None:
+            try:
+                cookies = context.cookies("https://www.instagram.com")
+                has_sessionid = any(c.get("name") == "sessionid" and c.get("value") for c in cookies)
+                return has_element and has_sessionid
+            except Exception:
+                pass
+
+        return has_element
 
     def login_insta(self, timeout_sec: int = 300) -> bool:
         """
-        Open persistent browser to Instagram so the user can log in once.
-        Session is permanently saved inside youtube_auth_profile.
+        Open persistent browser to Instagram with stealth flags so the user can log in once.
+        Ensures 5-minute timeout, auto-clicks 'Save info', verifies sessionid cookie,
+        saves storage state to insta_state.json, and waits for user Enter to flush cleanly.
         """
         try:
             from playwright.sync_api import sync_playwright
@@ -204,21 +262,10 @@ class InstagramReelsUploader:
         self._unlock_profile()
         print(f"\n[InstagramUploader] Launching browser with persistent profile at: {self.user_data_dir}")
 
-        browser_args = [
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-infobars",
-            "--start-maximized",
-        ]
-
         with sync_playwright() as p:
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=str(self.user_data_dir.resolve()),
-                headless=False,
-                args=browser_args,
-                viewport=None,
-            )
+            context = self._create_stealth_context(p, headless=False)
             page = context.pages[0] if context.pages else context.new_page()
+            page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
             print("[InstagramUploader] Navigating to https://www.instagram.com/ ...")
             try:
@@ -226,32 +273,56 @@ class InstagramReelsUploader:
             except Exception:
                 pass
 
-            page.wait_for_timeout(3000)
-            self._dismiss_modals(page)
+            page.wait_for_timeout(6000)
+            self._dismiss_modals(page, auto_save_info=True)
 
-            if self.is_logged_in(page):
-                print("[InstagramUploader] ✅ Already logged into Instagram!")
+            cookies = context.cookies("https://www.instagram.com")
+            has_sessionid = any(c.get("name") == "sessionid" and c.get("value") for c in cookies)
+
+            if self.is_logged_in(page) and has_sessionid:
+                print("[InstagramUploader] ✅ Already logged into Instagram with active sessionid!")
+                context.storage_state(path=str(self.state_file))
+                print(f"[InstagramUploader] 💾 Storage state saved cleanly to: {self.state_file}")
                 context.close()
                 return True
 
             print("\n=======================================================")
             print(" 🔑 ACTION REQUIRED: Please log in to Instagram in the browser window.")
-            print(f" Waiting up to {timeout_sec} seconds for login completion...")
+            print(f" Waiting up to {timeout_sec} seconds (5 minutes) for login & 2FA...")
+            print(" Make sure to click 'Save info' when prompted!")
             print("=======================================================\n")
 
             start_t = time.time()
             logged_in = False
             while time.time() - start_t < timeout_sec:
-                self._dismiss_modals(page)
-                if self.is_logged_in(page):
+                self._dismiss_modals(page, auto_save_info=True)
+                cookies = context.cookies("https://www.instagram.com")
+                has_sessionid = any(c.get("name") == "sessionid" and c.get("value") for c in cookies)
+                if self.is_logged_in(page) and has_sessionid:
                     logged_in = True
                     break
                 page.wait_for_timeout(2000)
 
             if logged_in:
-                self._dismiss_modals(page)
-                page.wait_for_timeout(3000)
-                print("\n[InstagramUploader] ✅ Successfully logged into Instagram! Session saved permanently.")
+                print("\n[InstagramUploader] ✅ Detected successful Instagram login with active sessionid!")
+                print("[InstagramUploader] Waiting 5 seconds for session to stabilize...")
+                page.wait_for_timeout(5000)
+                self._dismiss_modals(page, auto_save_info=True)
+
+                # Explicitly save storage state to insta_state.json
+                context.storage_state(path=str(self.state_file))
+                print(f"[InstagramUploader] 💾 Storage state saved cleanly to: {self.state_file}")
+
+                print("\n" + "=" * 70)
+                print(" ✅ Instagram login verified! Session and cookies saved.")
+                print(" 👉 Press ENTER in this terminal to safely close the browser and flush session...")
+                print("=" * 70)
+                try:
+                    input()
+                except Exception:
+                    time.sleep(5)
+
+                page.wait_for_timeout(2000)
                 context.close()
                 return True
             else:
@@ -349,7 +420,7 @@ class InstagramReelsUploader:
         full_caption = f"{title}\n\n{description}\n\n{' '.join(insta_tags[:15])}"
 
         # 1. Dismiss any residual modals & ensure on home feed
-        self._dismiss_modals(page)
+        self._dismiss_modals(page, auto_save_info=True)
         page.wait_for_timeout(1000)
 
         # 2. Click Create ("New post")
@@ -383,6 +454,7 @@ class InstagramReelsUploader:
         for sub_sel in [
             "span:has-text('Post')",
             "div[role='button']:has-text('Post')",
+            "div[role='menuitem']:has-text('Post')",
             "a:has-text('Post')",
         ]:
             try:
@@ -394,28 +466,11 @@ class InstagramReelsUploader:
             except Exception:
                 pass
 
-        # 3. Attach file via file chooser or input[type='file']
-        file_attached = False
-        try:
-            sel_btn = page.locator(
-                "button:has-text('Select from computer'), div[role='button']:has-text('Select from computer')"
-            ).first
-            with page.expect_file_chooser(timeout=8000) as fc_info:
-                if sel_btn.is_visible():
-                    sel_btn.click()
-                else:
-                    page.locator("input[type='file']").first.click()
-            fc_info.value.set_files(str(video_path))
-            file_attached = True
-        except Exception as e:
-            print(f"[InstagramUploader] File chooser notice: {e}, attempting direct file input...")
-
-        if not file_attached:
-            file_input = page.locator("input[type='file']").first
-            file_input.wait_for(state="attached", timeout=15000)
-            file_input.set_input_files(str(video_path))
-
-        print(f"[InstagramUploader] File selected: {os.path.basename(video_path)}")
+        # 3. Attach file directly onto hidden input[type='file']
+        file_input = page.locator("input[type='file']").first
+        file_input.wait_for(state="attached", timeout=15000)
+        file_input.set_input_files(str(video_path))
+        print(f"[InstagramUploader] Attached video file: {os.path.basename(video_path)}")
         page.wait_for_timeout(3500)
 
         # 4. Handle informational popups: "Video posts are now shared as reels"
@@ -436,13 +491,12 @@ class InstagramReelsUploader:
         # 5. Aspect Ratio: Enforce 9:16 (Zero-Crop Vertical Reel)
         try:
             crop_btn = page.locator(
-                "svg[aria-label='Select crop'], button:has(svg[aria-label='Select crop']), [aria-label*='crop' i]"
+                "svg[aria-label='Select crop'], button:has(svg[aria-label='Select crop']), [aria-label*='crop' i], div[role='button']:has(svg[aria-label='Select crop'])"
             ).first
             if crop_btn.is_visible():
                 crop_btn.click(force=True)
                 page.wait_for_timeout(800)
 
-                # Select 9:16 or Original
                 for r_sel in [
                     "button:has-text('9:16')",
                     "div[role='button']:has-text('9:16')",
@@ -466,7 +520,7 @@ class InstagramReelsUploader:
         next_btn = page.locator("div[role='button']:has-text('Next'), button:has-text('Next')").first
         next_btn.wait_for(state="visible", timeout=15000)
         next_btn.click(force=True)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(2500)
 
         # 7. Click 'Next' again -> Details / Caption screen
         next_btn2 = page.locator("div[role='button']:has-text('Next'), button:has-text('Next')").first
@@ -477,7 +531,7 @@ class InstagramReelsUploader:
         # 8. Fill Caption with stealth typing
         print(f"[InstagramUploader] Entering caption and hashtags for '{title}'...")
         caption_box = page.locator(
-            "div[aria-label*='caption' i][contenteditable='true'], div[aria-label*='Write a caption' i], div[role='textbox']"
+            "div[aria-label*='Write a caption' i], div[aria-label*='caption' i][contenteditable='true'], div[role='textbox']"
         ).first
         caption_box.wait_for(state="visible", timeout=15000)
         human_sleep(1.0, 1.5)
@@ -494,7 +548,7 @@ class InstagramReelsUploader:
 
         human_sleep(1.0, 2.0)
 
-        # 9. Schedule or Share
+        # 9. Smart Schedule vs. Share Handling
         is_scheduled = False
         action_verb = "Share"
 
@@ -503,7 +557,6 @@ class InstagramReelsUploader:
             target_time = scheduled_slot.get("scheduled_time")
             slot_name = scheduled_slot.get("slot_name", "Peak Window")
 
-            # Try finding Advanced settings / Schedule accordion
             try:
                 adv_btn = page.locator(
                     "div:has-text('Advanced settings'), span:has-text('Advanced settings')"
@@ -512,11 +565,10 @@ class InstagramReelsUploader:
                     adv_btn.click(force=True)
                     page.wait_for_timeout(1000)
 
-                    # Look for "Schedule this reel" toggle
                     sched_toggle = page.locator(
                         "input[type='checkbox'][aria-label*='Schedule' i], "
                         "div:has-text('Schedule this reel') input[type='checkbox'], "
-                        "div[role='switch']"
+                        "div[role='switch']:has-text('Schedule')"
                     ).first
                     if sched_toggle.is_visible():
                         sched_toggle.click(force=True)
@@ -527,10 +579,10 @@ class InstagramReelsUploader:
             except Exception as e:
                 print(f"[InstagramUploader] Scheduling option notice: {e}")
 
-        # 10. Click Share / Schedule
-        print(f"[InstagramUploader] Uploading & {action_verb}ing Reel...")
+        # 10. Click Share / Schedule (Defaults to Share on standard web)
+        print(f"[InstagramUploader] Submitting Reel via '{action_verb}' button...")
         if progress_callback:
-            progress_callback({"stage": "upload_progress", "percent": 50, "message": f"{action_verb}ing Reel..."})
+            progress_callback({"stage": "upload_progress", "percent": 50, "message": f"{action_verb}ing Reel to Instagram..."})
 
         submit_btn = page.locator(
             f"div[role='button']:has-text('{action_verb}'), button:has-text('{action_verb}'), "
@@ -540,12 +592,12 @@ class InstagramReelsUploader:
         submit_btn.click(force=True)
 
         # 11. Wait for confirmation ("Your reel has been shared." / checkmark)
-        print("[InstagramUploader] Waiting for Instagram upload confirmation...")
+        print("[InstagramUploader] Waiting for Instagram upload confirmation (up to 120s)...")
         upload_complete = False
         reel_url = None
         start_wait = time.time()
 
-        while time.time() - start_wait < 180:
+        while time.time() - start_wait < 120:
             for s_sel in [
                 "div:has-text('Your reel has been shared.')",
                 "div:has-text('Your reel has been scheduled.')",
@@ -579,7 +631,9 @@ class InstagramReelsUploader:
             page.wait_for_timeout(2000)
 
         if not upload_complete:
-            raise RuntimeError("Instagram Reel upload confirmation did not appear within 180s timeout.")
+            raise RuntimeError("Instagram Reel upload confirmation did not appear within 120s timeout.")
+
+        page.wait_for_timeout(3000)
 
         # Extract post URL if present
         try:
@@ -594,7 +648,7 @@ class InstagramReelsUploader:
         # Close any lingering dialogs
         try:
             close_btn = page.locator(
-                "div[role='dialog'] svg[aria-label='Close'], div[role='dialog'] button:has-text('Close')"
+                "div[role='dialog'] svg[aria-label='Close'], div[role='dialog'] button:has-text('Close'), svg[aria-label='Close']"
             ).first
             if close_btn.is_visible():
                 close_btn.click(force=True)
@@ -683,21 +737,21 @@ class InstagramReelsUploader:
 
         self._unlock_profile()
 
-        browser_args = [
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-infobars",
-            "--start-maximized",
-        ]
-
         with sync_playwright() as p:
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=str(self.user_data_dir.resolve()),
-                headless=False,
-                args=browser_args,
-                viewport=None,
-            )
+            context = self._create_stealth_context(p, headless=False)
             page = context.pages[0] if context.pages else context.new_page()
+            page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+            # Check if saved state exists and load cookies
+            if self.state_file.exists():
+                try:
+                    with open(self.state_file, "r", encoding="utf-8") as f:
+                        saved_state = json.load(f)
+                    if "cookies" in saved_state:
+                        context.add_cookies(saved_state["cookies"])
+                        print(f"[InstagramUploader] Restored session cookies from {self.state_file.name}")
+                except Exception as e:
+                    print(f"[InstagramUploader] Notice reading state file: {e}")
 
             print("[InstagramUploader] Navigating to Instagram...")
             try:
@@ -705,18 +759,51 @@ class InstagramReelsUploader:
             except Exception:
                 pass
 
-            page.wait_for_timeout(3000)
-            self._dismiss_modals(page)
+            # Wait 6 seconds for React app to hydrate
+            print("[InstagramUploader] Waiting 6 seconds for Instagram app to hydrate...")
+            page.wait_for_timeout(6000)
+            self._dismiss_modals(page, auto_save_info=True)
 
-            if not self.is_logged_in(page):
-                print("\n[InstagramUploader] ⚠️ Not logged into Instagram. Please log in in the opened browser window...")
-                for _ in range(60):
-                    self._dismiss_modals(page)
-                    if self.is_logged_in(page):
+            cookies = context.cookies("https://www.instagram.com")
+            has_sessionid = any(c.get("name") == "sessionid" and c.get("value") for c in cookies)
+            logged_in = self.is_logged_in(page) and has_sessionid
+
+            if not logged_in and self.state_file.exists():
+                try:
+                    with open(self.state_file, "r", encoding="utf-8") as f:
+                        saved_state = json.load(f)
+                    if "cookies" in saved_state:
+                        context.add_cookies(saved_state["cookies"])
+                        page.reload(wait_until="domcontentloaded", timeout=30000)
+                        page.wait_for_timeout(5000)
+                        self._dismiss_modals(page, auto_save_info=True)
+                        cookies = context.cookies("https://www.instagram.com")
+                        has_sessionid = any(c.get("name") == "sessionid" and c.get("value") for c in cookies)
+                        logged_in = self.is_logged_in(page) and has_sessionid
+                except Exception as e:
+                    print(f"[InstagramUploader] Notice reloading state: {e}")
+
+            if not logged_in:
+                print("\n" + "=" * 75)
+                print(" [InstagramUploader] ⚠️ Please log into Instagram in the open browser window")
+                print(" (waiting up to 180s for login & 'Save info')...")
+                print("=" * 75 + "\n")
+                wait_login_start = time.time()
+                while time.time() - wait_login_start < 180:
+                    self._dismiss_modals(page, auto_save_info=True)
+                    cookies = context.cookies("https://www.instagram.com")
+                    has_sessionid = any(c.get("name") == "sessionid" and c.get("value") for c in cookies)
+                    if self.is_logged_in(page) and has_sessionid:
+                        logged_in = True
+                        print("\n[InstagramUploader] ✅ Instagram login detected in open browser!")
+                        page.wait_for_timeout(5000)
+                        self._dismiss_modals(page, auto_save_info=True)
+                        context.storage_state(path=str(self.state_file))
+                        print(f"[InstagramUploader] 💾 Storage state updated cleanly to: {self.state_file}")
                         break
                     page.wait_for_timeout(2000)
 
-            if not self.is_logged_in(page):
+            if not logged_in:
                 context.close()
                 raise RuntimeError("Instagram login required. Run 'clipwa login-insta' first.")
 
@@ -754,7 +841,7 @@ class InstagramReelsUploader:
                     try:
                         page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=30000)
                         page.wait_for_timeout(2000)
-                        self._dismiss_modals(page)
+                        self._dismiss_modals(page, auto_save_info=True)
                     except Exception:
                         pass
 
@@ -771,7 +858,7 @@ class InstagramReelsUploader:
                     clip["instagram_result"] = res
                     recent_uploads += 1
 
-                    sched_str = f" (Scheduled for {s_slot['display_plan']})" if s_slot else ""
+                    sched_str = f" (Scheduled for {s_slot['display_plan']})" if s_slot and res.get("status") == "scheduled" else ""
                     print(f"✅ Clip [{idx}/{total_clips}] Instagram Reel shared: {res.get('reel_url')}{sched_str}")
 
                     # Record to persistent schedule ledger
