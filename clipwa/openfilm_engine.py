@@ -60,30 +60,31 @@ class OpenFilmEngine:
         # Locate openfilm executable
         self.openfilm_cmd = self._find_openfilm_cli()
 
-    def get_style(self, style: Union[str, Dict[str, Any], None] = "forseth_ai") -> Dict[str, Any]:
+    def get_style(self, style: Union[str, Dict[str, Any], None] = "pro_cinematic_reel") -> Dict[str, Any]:
         """Load and resolve an OpenFilm Style Blueprint by name or dictionary."""
-        from .style_cloner import FORSETH_AI_BLUEPRINT
+        from .style_cloner import PRO_CINEMATIC_REEL_BLUEPRINT, FORSETH_AI_BLUEPRINT
         if isinstance(style, dict):
-            merged = dict(FORSETH_AI_BLUEPRINT)
+            merged = dict(PRO_CINEMATIC_REEL_BLUEPRINT)
             merged.update(style)
             return merged
 
-        style_name = str(style or "forseth_ai").strip().lower()
+        style_name = str(style or "pro_cinematic_reel").strip().lower()
         candidates = [
             self.styles_dir / f"{style_name}.json",
+            self.styles_dir / "pro_cinematic_reel.json",
             self.styles_dir / "forseth_ai.json",
         ]
         for c in candidates:
             if c.exists():
                 try:
                     data = json.loads(c.read_text(encoding="utf-8"))
-                    merged = dict(FORSETH_AI_BLUEPRINT)
+                    merged = dict(PRO_CINEMATIC_REEL_BLUEPRINT)
                     merged.update(data)
                     return merged
                 except Exception as e:
                     logger.warning(f"Error reading style blueprint {c}: {e}")
 
-        return dict(FORSETH_AI_BLUEPRINT)
+        return dict(PRO_CINEMATIC_REEL_BLUEPRINT)
 
     def _inject_bin_path(self) -> None:
         """Prepend local bin directory to os.environ['PATH']."""
@@ -237,7 +238,7 @@ class OpenFilmEngine:
         bg_tune_path: Optional[Path] = None,
         hook_sfx_path: Optional[Path] = None,
         font_size_px: int = 68,
-        style: Union[str, Dict[str, Any], None] = "forseth_ai",
+        style: Union[str, Dict[str, Any], None] = "pro_cinematic_reel",
     ) -> Path:
         """
         Build an OpenFilm project folder adhering strictly to the OpenFilm Protocol:
@@ -328,15 +329,15 @@ class OpenFilmEngine:
         if len(clean_hook) > 65:
             clean_hook = clean_hook[:62] + "..."
 
-        # 4. Generate overlay.html (HUD, Typography, Animations)
+        # 4. Generate overlay.html (clean bespoke cinematic typography, no HUD clutter)
         overlay_html_path = project_dir / "overlay.html"
         self._write_overlay_html(
             output_path=overlay_html_path,
             duration=duration,
-            hook_title=clean_hook,
             phrases=phrases,
             font_size_px=font_size_px,
             style_data=style_data,
+            hook_title=clean_hook,
         )
 
         # 5. Generate film.html (Multi-Track OpenFilm Stage)
@@ -345,9 +346,10 @@ class OpenFilmEngine:
             output_path=film_html_path,
             duration=duration,
             clip_actual_dur=clip_actual_dur,
-            bg_actual_dur=bg_actual_dur,
             has_hook_sfx=has_hook_sfx,
+            sfx_actual_dur=sfx_actual_dur,
             has_bg_music=has_bg_music,
+            bg_actual_dur=bg_actual_dur,
             style_data=style_data,
         )
 
@@ -359,28 +361,35 @@ class OpenFilmEngine:
         output_path: Path,
         duration: float,
         clip_actual_dur: float,
-        bg_actual_dur: float,
         has_hook_sfx: bool,
+        sfx_actual_dur: float,
         has_bg_music: bool,
+        bg_actual_dur: float,
         style_data: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Write the multi-track film.html according to OpenFilm Protocol 0.1."""
+        """
+        Write film.html cutting together tracks:
+        - Track 1: Cinematic Color Grading & Editorial Kinetic Typography (overlay.html)
+        - Track 2: Primary Foreground Video with Voice Audio (assets/clip.mp4)
+        - Track 3: Ambient Blurred Background Video (muted)
+        - Track 4: Audio Stems (Hook SFX & Rotated Viral Music)
+        """
         sd = style_data or {}
         cg = sd.get("color_grade", {})
         fm = sd.get("framing_and_motion", {})
 
-        fg_filter = cg.get("css_filter", "contrast(1.14) saturate(1.15) brightness(0.95)")
-        bg_blur = cg.get("bg_blur_px", 38)
-        bg_bright = cg.get("bg_brightness", 0.36)
-        bg_sat = cg.get("bg_saturate", 1.18)
-        bg_scale = cg.get("bg_scale", 1.08)
+        fg_filter = cg.get("css_filter", "contrast(1.15) saturate(1.06) brightness(0.93)")
+        bg_blur = cg.get("bg_blur_px", 50)
+        bg_bright = cg.get("bg_brightness", 0.18)
+        bg_sat = cg.get("bg_saturate", 0.90)
+        bg_scale = cg.get("bg_scale", 1.10)
         fg_radius = fm.get("fg_border_radius_px", 18)
-        fg_shadow = fm.get("fg_box_shadow", "0 25px 60px rgba(0, 0, 0, 0.75)")
+        fg_shadow = fm.get("fg_box_shadow", "0 25px 60px rgba(0, 0, 0, 0.85)")
         fg_top = fm.get("fg_video_top_px", 460)
         fg_height = fm.get("fg_video_height_px", 1000)
 
-        # Subtle dynamic camera zoom on central video
-        fg_animation = "animation: cameraPunch 4.2s cubic-bezier(0.22, 1, 0.36, 1) infinite;" if fm.get("camera_zoom_enabled", True) else ""
+        # Subtle handheld float & slow cinematic push-in on central video
+        fg_animation = "animation: cinematicPushFloat 8.5s cubic-bezier(0.25, 1, 0.5, 1) infinite;" if fm.get("camera_zoom_enabled", True) else ""
 
         # Clamp video duration strictly to actual file duration - 0.02s
         if clip_actual_dur > 0:
@@ -391,7 +400,6 @@ class OpenFilmEngine:
 
         audio_tracks: List[str] = []
         if has_hook_sfx:
-            # Omit #t= so OpenFilm naturally plays the full sound effect without media fragment range errors
             audio_tracks.append(
                 '  <section>\n    <audio id="hook_sfx" src="assets/hook_sfx.wav" volume="0.45"></audio>\n  </section>'
             )
@@ -401,7 +409,7 @@ class OpenFilmEngine:
             else:
                 bg_end = duration
             audio_tracks.append(
-                f'  <section>\n    <audio id="bg_music" src="assets/bg_music.wav#t=0,{bg_end:.3f}" volume="0.11"></audio>\n  </section>'
+                f'  <section>\n    <audio id="bg_music" src="assets/bg_music.wav#t=0,{bg_end:.3f}" volume="0.12"></audio>\n  </section>'
             )
 
         audio_tracks_block = "\n".join(audio_tracks) if audio_tracks else ""
@@ -417,9 +425,31 @@ class OpenFilmEngine:
       background: #000;
       overflow: hidden;
     }}
-    @keyframes cameraPunch {{
-      0%, 100% {{ scale: 1; }}
-      42%, 58% {{ scale: 1.10; }}
+    @keyframes cinematicPushFloat {{
+      0% {{
+        scale: 1.0;
+        translate: 0px 0px;
+      }}
+      25% {{
+        scale: 1.025;
+        translate: 1.8px -1.2px;
+      }}
+      50% {{
+        scale: 1.055;
+        translate: -1.2px 1.5px;
+      }}
+      75% {{
+        scale: 1.075;
+        translate: 1.5px 0.8px;
+      }}
+      95% {{
+        scale: 1.09;
+        translate: -0.8px -1.0px;
+      }}
+      100% {{
+        scale: 1.0;
+        translate: 0px 0px;
+      }}
     }}
     .bg-video {{
       object-fit: cover;
@@ -436,7 +466,7 @@ class OpenFilmEngine:
   </style>
 </head>
 <body>
-  <!-- Track 1: Cinematic HUD, 3s Hook Banner & Pro Hormozi Kinetic Typography -->
+  <!-- Track 1: Cinematic Color Grading & Editorial Kinetic Typography -->
   <section>
     <iframe id="overlay" src="overlay.html" at="0" style="left: 0; top: 0; width: 1080px; height: 1920px"></iframe>
   </section>
@@ -464,52 +494,40 @@ class OpenFilmEngine:
         self,
         output_path: Path,
         duration: float,
-        hook_title: str,
         phrases: List[Dict[str, Any]],
         font_size_px: int,
         style_data: Optional[Dict[str, Any]] = None,
+        hook_title: str = "",
     ) -> None:
         """
         Write overlay.html containing deterministic frame(t) logic for:
-        1. 3-Second Glassmorphic Hook Banner with cubic-bezier entrance/exit.
-        2. Pro kinetic typography with spring scale pops and contrast backing.
-        3. Bottom neon progress bar + vignette + audio-reactive waveform indicators.
+        1. 100% Clean Bespoke Human-Editor Cinema Aesthetic (NO top banners, NO progress bars).
+        2. Editorial kinetic typography with buttery 110ms motion-blur entrance.
+        3. 120ms optical exposure pulse / flash on sentence cuts.
+        4. Pure negative space lighting: full-frame cinematic vignette and film grain.
         """
         sd = style_data or {}
         cs = sd.get("caption_style", {})
         cg = sd.get("color_grade", {})
-        va = sd.get("visual_accents", {})
-        hb = va.get("glassmorphic_hook_badge", {})
-        pb = va.get("progress_bar", {})
+        fm = sd.get("framing_and_motion", {})
 
-        font_family = cs.get("font_family", "Montserrat, 'Plus Jakarta Sans', 'Inter', sans-serif")
-        font_sz = font_size_px or cs.get("font_size_px", 68)
-        color_default = cs.get("color_default", "#FFFFFF")
-        color_active = cs.get("color_active", "#FFE600")
-        color_power = cs.get("color_power", "#00FF66")
-        color_danger = cs.get("color_danger", "#FF3366")
-        active_scale = cs.get("active_word_scale", 1.16)
-        stroke_w = cs.get("stroke_width_px", 3.5)
-        stroke_color = cs.get("stroke_color", "#000000")
-        text_shadow = cs.get("text_shadow", "0 6px 18px rgba(0, 0, 0, 0.95), 0 0 28px rgba(0, 0, 0, 0.75)")
-        active_text_shadow = cs.get("active_text_shadow", "0 8px 24px rgba(0, 0, 0, 1), 0 0 32px rgba(255, 230, 0, 0.6)")
+        font_family = cs.get("font_family", "Montserrat, 'Plus Jakarta Sans', 'Inter', -apple-system, sans-serif")
+        font_sz = font_size_px or cs.get("font_size_px", 66)
+        color_default = cs.get("color_default", "#F8F9FA")
+        color_active = cs.get("color_active", "#FFD60A")
+        color_power = cs.get("color_power", "#FFFFFF")
+        active_scale = cs.get("active_word_scale", 1.06)
+        letter_spacing = cs.get("letter_spacing_em", "-0.025em")
+        top_px = cs.get("top_px", 1300)
+        safe_width = cs.get("safe_width_px", 840)
+        safe_left = cs.get("safe_left_px", 120)
 
-        vignette_radial = cg.get("vignette_radial", "radial-gradient(ellipse at center, rgba(0,0,0,0) 56%, rgba(0,0,0,0.65) 100%)")
-        bottom_gradient = cg.get("bottom_contrast_gradient", "linear-gradient(to top, rgba(0,0,0,0.72) 0%, rgba(0,0,0,0.25) 28%, rgba(0,0,0,0) 55%)")
-
-        badge_text = hb.get("badge_text", "AI BLUEPRINT")
-        badge_bg = hb.get("badge_bg", "#FFE600")
-        badge_color = hb.get("badge_color", "#000000")
-        badge_card_bg = hb.get("card_bg", "rgba(18, 18, 24, 0.82)")
-        badge_card_border = hb.get("card_border", "1.5px solid rgba(255, 255, 255, 0.22)")
-        badge_dur = hb.get("display_duration_sec", 3.0)
-
-        progress_color = pb.get("color", "linear-gradient(90deg, #FFE600 0%, #00FF66 100%)")
-        progress_glow = pb.get("glow", "0 0 14px rgba(255, 230, 0, 0.7)")
+        vignette_radial = cg.get("vignette_radial", "radial-gradient(ellipse at center, rgba(0,0,0,0) 50%, rgba(0,0,0,0.55) 100%)")
+        bottom_gradient = cg.get("bottom_contrast_gradient", "linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0) 35%, rgba(0,0,0,0.65) 82%, rgba(0,0,0,0.88) 100%)")
+        grain_opacity = cg.get("cinematic_film_grain_opacity", 0.035)
 
         phrases_json = json.dumps(phrases, ensure_ascii=False)
         power_words_json = json.dumps(list(POWER_WORDS))
-        danger_words_json = json.dumps(list(DANGER_WORDS))
 
         html = f"""<!doctype html>
 <html>
@@ -543,53 +561,16 @@ class OpenFilmEngine:
       z-index: 1;
     }}
 
-    /* Bottom 35% Smooth Contrast Gradient for 100% Subtitle Legibility */
+    /* Full-Height Atmospheric Gradient for Seamless Negative Space Lighting */
     #bottom-contrast {{
       position: absolute;
-      bottom: 0;
+      top: 0;
       left: 0;
       width: 1080px;
-      height: 860px;
+      height: 1920px;
       background: {bottom_gradient};
       pointer-events: none;
       z-index: 2;
-    }}
-
-    /* 3-Second Viral Hook Banner (Safe Zone: top 210px) */
-    #hook-banner {{
-      position: absolute;
-      top: 210px;
-      left: 60px;
-      width: 960px;
-      padding: 24px 30px;
-      background: {badge_card_bg};
-      backdrop-filter: blur(24px);
-      -webkit-backdrop-filter: blur(24px);
-      border-radius: 24px;
-      border: {badge_card_border};
-      box-shadow: 0 16px 45px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.2);
-      text-align: center;
-      font-size: 38px;
-      font-weight: 900;
-      letter-spacing: 0.5px;
-      line-height: 1.25;
-      text-transform: uppercase;
-      color: #FFFFFF;
-      text-shadow: 0 3px 12px rgba(0, 0, 0, 0.8);
-      transform-origin: center top;
-      opacity: 0;
-      z-index: 10;
-    }}
-    #hook-badge {{
-      display: inline-block;
-      font-size: 19px;
-      font-weight: 800;
-      background: {badge_bg};
-      color: {badge_color};
-      padding: 4px 14px;
-      border-radius: 12px;
-      margin-bottom: 8px;
-      letter-spacing: 1.5px;
     }}
 
     /* Subtle Cinematic Film Grain Overlay */
@@ -601,97 +582,67 @@ class OpenFilmEngine:
       height: 1920px;
       pointer-events: none;
       z-index: 3;
-      opacity: 0.04;
+      opacity: {grain_opacity};
       background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
     }}
 
-    /* Pro Hormozi Kinetic Subtitles Safe Box (Lower-Middle safe area: ~64% safe zone) */
+    /* Subtle 120ms Optical Exposure Flash on Sentence Cuts */
+    #optical-pulse {{
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 1080px;
+      height: 1920px;
+      pointer-events: none;
+      background: rgba(255, 255, 255, 0.08);
+      opacity: 0;
+      mix-blend-mode: overlay;
+      z-index: 4;
+    }}
+
+    /* Editorial Lower-Third Typography Sweet Spot (strictly within central {safe_width}px safe width) */
     #subtitles-container {{
       position: absolute;
-      top: 1220px;
-      left: 60px;
-      width: 960px;
-      min-height: 160px;
+      top: {top_px}px;
+      left: {safe_left}px;
+      width: {safe_width}px;
+      min-height: 180px;
       display: flex;
       flex-wrap: wrap;
       justify-content: center;
       align-items: center;
-      gap: 16px 20px;
+      gap: 14px 18px;
       text-align: center;
       z-index: 20;
-      transition: transform 0.08s ease-out;
+      opacity: 0;
+      will-change: transform, opacity, filter;
     }}
 
     .word {{
       display: inline-block;
       font-size: {font_sz}px;
-      font-weight: 900;
+      font-weight: 800;
       text-transform: uppercase;
-      line-height: 1.1;
-      letter-spacing: -0.03em;
+      line-height: 1.15;
+      letter-spacing: {letter_spacing};
       color: {color_default};
-      -webkit-text-stroke: {stroke_w}px {stroke_color};
-      text-shadow: {text_shadow};
-      transition: none;
+      text-shadow: 0 4px 18px rgba(0, 0, 0, 0.9), 0 1px 4px rgba(0, 0, 0, 0.95);
       transform-origin: center center;
+      transition: color 0.06s ease, transform 0.08s ease, text-shadow 0.08s ease;
     }}
 
-    /* Active Highlighted Word with Spring Physics */
+    /* Active Spoken Impact Word: Warm Gold with Soft Glow */
     .word.active {{
-      color: {color_active};
+      color: {color_active} !important;
       transform: scale({active_scale});
-      -webkit-text-stroke: 4px #000000;
-      text-shadow: {active_text_shadow};
+      text-shadow: 0 4px 20px rgba(0, 0, 0, 0.9), 0 0 22px rgba(255, 214, 10, 0.65) !important;
     }}
 
+    /* Power Words: Clean Crisp Icy Glow */
     .word.active.power {{
       color: {color_power} !important;
-      text-shadow: 0 8px 24px rgba(0, 0, 0, 1), 0 0 30px rgba(0, 255, 102, 0.6) !important;
-    }}
-
-    .word.active.danger {{
-      color: {color_danger} !important;
-      text-shadow: 0 8px 24px rgba(0, 0, 0, 1), 0 0 30px rgba(255, 51, 102, 0.6) !important;
-    }}
-
-    /* Bottom Neon Retention Progress Bar */
-    #progress-track {{
-      position: absolute;
-      bottom: 34px;
-      left: 60px;
-      width: 960px;
-      height: 6px;
-      background: rgba(255, 255, 255, 0.18);
-      border-radius: 4px;
-      overflow: hidden;
-      z-index: 10;
-    }}
-    #progress-fill {{
-      height: 100%;
-      width: 0%;
-      background: {progress_color};
-      border-radius: 4px;
-      box-shadow: {progress_glow};
-    }}
-
-    /* Dynamic Audio-Reactive Waveform Indicator */
-    #waveform-bar {{
-      position: absolute;
-      bottom: 54px;
-      right: 60px;
-      display: flex;
-      align-items: flex-end;
-      gap: 5px;
-      height: 24px;
-      z-index: 10;
-      opacity: 0.85;
-    }}
-    .wave-stick {{
-      width: 5px;
-      background: {color_active};
-      border-radius: 3px;
-      height: 6px;
-      box-shadow: 0 0 8px rgba(255, 230, 0, 0.6);
+      transform: scale(1.08);
+      text-shadow: 0 4px 20px rgba(0, 0, 0, 0.95), 0 0 22px rgba(255, 255, 255, 0.75) !important;
     }}
   </style>
 </head>
@@ -699,53 +650,20 @@ class OpenFilmEngine:
   <div id="vignette"></div>
   <div id="bottom-contrast"></div>
   <div id="film-grain"></div>
+  <div id="optical-pulse"></div>
 
-  <!-- 3-Second Viral Hook Banner -->
-  <div id="hook-banner">
-    <div id="hook-badge">{badge_text}</div><br>
-    <span id="hook-text">{hook_title}</span>
-  </div>
-
-  <!-- Hormozi Kinetic Typography Container -->
+  <!-- Editorial Kinetic Typography Container -->
   <div id="subtitles-container"></div>
-
-  <!-- Audio Waveform Indicator -->
-  <div id="waveform-bar">
-    <div class="wave-stick" id="ws1"></div>
-    <div class="wave-stick" id="ws2"></div>
-    <div class="wave-stick" id="ws3"></div>
-    <div class="wave-stick" id="ws4"></div>
-    <div class="wave-stick" id="ws5"></div>
-  </div>
-
-  <!-- Bottom Retention Progress Bar -->
-  <div id="progress-track">
-    <div id="progress-fill"></div>
-  </div>
 
   <script>
     const DURATION = {duration};
     const phrases = {phrases_json};
     const powerWords = new Set({power_words_json});
-    const dangerWords = new Set({danger_words_json});
-    const BADGE_DUR = {badge_dur};
 
-    const banner = document.getElementById('hook-banner');
     const subContainer = document.getElementById('subtitles-container');
-    const progressFill = document.getElementById('progress-fill');
-    const waveSticks = [
-      document.getElementById('ws1'),
-      document.getElementById('ws2'),
-      document.getElementById('ws3'),
-      document.getElementById('ws4'),
-      document.getElementById('ws5')
-    ];
+    const pulseEl = document.getElementById('optical-pulse');
 
     let cachedPhraseIdx = -1;
-
-    function cubicBezier(t) {{
-      return 1 - Math.pow(1 - t, 3);
-    }}
 
     function cleanWordText(raw) {{
       return raw.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
@@ -757,27 +675,6 @@ class OpenFilmEngine:
       width: 1080,
       height: 1920,
       frame(t) {{
-        // 1. Hook Banner Animation (0.0s to BADGE_DUR)
-        const exitStart = Math.max(1.8, BADGE_DUR - 0.45);
-        if (t < 0.42) {{
-          const p = cubicBezier(t / 0.42);
-          banner.style.display = 'block';
-          banner.style.opacity = p;
-          banner.style.transform = `translateY(${{(1 - p) * -38}}px) scale(${{0.92 + 0.08 * p}})`;
-        }} else if (t < exitStart) {{
-          banner.style.display = 'block';
-          banner.style.opacity = 1;
-          banner.style.transform = 'translateY(0) scale(1)';
-        }} else if (t < BADGE_DUR) {{
-          const p = cubicBezier((t - exitStart) / (BADGE_DUR - exitStart));
-          banner.style.display = 'block';
-          banner.style.opacity = 1 - p;
-          banner.style.transform = `translateY(${{-p * 36}}px) scale(${{1 - 0.08 * p}})`;
-        }} else {{
-          banner.style.display = 'none';
-        }}
-
-        // 2. Pro Kinetic Typography
         let currentPhrase = null;
         let currentPhraseIdx = -1;
         for (let i = 0; i < phrases.length; i++) {{
@@ -791,64 +688,61 @@ class OpenFilmEngine:
 
         if (!currentPhrase) {{
           subContainer.innerHTML = '';
+          subContainer.style.opacity = '0';
           cachedPhraseIdx = -1;
-        }} else {{
-          // Re-render DOM elements only if phrase index changed
-          if (cachedPhraseIdx !== currentPhraseIdx) {{
-            cachedPhraseIdx = currentPhraseIdx;
-            subContainer.innerHTML = '';
-            currentPhrase.words.forEach((w, wIdx) => {{
-              const span = document.createElement('span');
-              span.className = 'word';
-              span.id = `w_${{wIdx}}`;
-              span.textContent = w.word;
-              subContainer.appendChild(span);
-            }});
-          }}
+          if (pulseEl) pulseEl.style.opacity = '0';
+          return;
+        }}
 
-          // Sentence cut micro-spring pop & pulse
-          const phraseAge = t - currentPhrase.start;
-          if (phraseAge >= 0 && phraseAge < 0.22) {{
-            const p = phraseAge / 0.22;
-            const popScale = 1.06 - 0.06 * p;
-            const popY = (1 - p) * -8;
-            subContainer.style.transform = `translateY(${{popY.toFixed(1)}}px) scale(${{popScale.toFixed(3)}})`;
-          }} else {{
-            subContainer.style.transform = 'translateY(0) scale(1.0)';
-          }}
-
-          // Apply kinetic highlight and spring scale to active spoken word
+        if (cachedPhraseIdx !== currentPhraseIdx) {{
+          cachedPhraseIdx = currentPhraseIdx;
+          subContainer.innerHTML = '';
           currentPhrase.words.forEach((w, wIdx) => {{
-            const el = document.getElementById(`w_${{wIdx}}`);
-            if (!el) return;
-
-            const isSpoken = (t >= w.start && t <= w.end);
-            if (isSpoken) {{
-              el.classList.add('active');
-              const cl = cleanWordText(w.word);
-              if (powerWords.has(cl)) {{
-                el.classList.add('power');
-                el.classList.remove('danger');
-              }} else if (dangerWords.has(cl)) {{
-                el.classList.add('danger');
-                el.classList.remove('power');
-              }} else {{
-                el.classList.remove('power', 'danger');
-              }}
-            }} else {{
-              el.classList.remove('active', 'power', 'danger');
-            }}
+            const span = document.createElement('span');
+            span.className = 'word';
+            span.id = `w_${{wIdx}}`;
+            span.textContent = w.word;
+            subContainer.appendChild(span);
           }});
         }}
 
-        // 3. Bottom Progress Bar Fill
-        const progressPct = Math.min(100, Math.max(0, (t / DURATION) * 100));
-        progressFill.style.width = progressPct.toFixed(2) + '%';
+        // Buttery 110ms motion-blur word reveal entrance
+        const phraseAge = t - currentPhrase.start;
+        if (phraseAge >= 0 && phraseAge < 0.11) {{
+          const p = Math.max(0, phraseAge / 0.11);
+          const ty = (1 - p) * 10;
+          const blurPx = (1 - p) * 4;
+          subContainer.style.opacity = p.toFixed(3);
+          subContainer.style.transform = `translate3d(0, ${{ty.toFixed(1)}}px, 0)`;
+          subContainer.style.filter = `blur(${{blurPx.toFixed(1)}}px)`;
 
-        // 4. Waveform Sticks Pulsing
-        waveSticks.forEach((stick, idx) => {{
-          const h = 6 + Math.abs(Math.sin(t * 7.5 + idx * 1.2)) * 18;
-          stick.style.height = h.toFixed(1) + 'px';
+          // Subtle optical exposure pulse (110ms)
+          if (pulseEl) {{
+            pulseEl.style.opacity = ((1 - p) * 0.85).toFixed(3);
+          }}
+        }} else {{
+          subContainer.style.opacity = '1';
+          subContainer.style.transform = 'translate3d(0, 0, 0)';
+          subContainer.style.filter = 'none';
+          if (pulseEl) pulseEl.style.opacity = '0';
+        }}
+
+        // Active spoken word highlight
+        currentPhrase.words.forEach((w, wIdx) => {{
+          const el = document.getElementById(`w_${{wIdx}}`);
+          if (!el) return;
+          const isSpoken = (t >= w.start && t <= w.end);
+          if (isSpoken) {{
+            el.classList.add('active');
+            const cl = cleanWordText(w.word);
+            if (powerWords.has(cl)) {{
+              el.classList.add('power');
+            }} else {{
+              el.classList.remove('power');
+            }}
+          }} else {{
+            el.classList.remove('active', 'power');
+          }}
         }});
       }}
     }};

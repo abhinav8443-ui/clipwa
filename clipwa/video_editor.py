@@ -294,7 +294,7 @@ class VideoEditor:
         words_data: Optional[List[Dict[str, Any]]] = None,
         hook_title: Optional[str] = None,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-        style: Union[str, Dict[str, Any], None] = "forseth_ai",
+        style: Union[str, Dict[str, Any], None] = "pro_cinematic_reel",
     ) -> str:
         """
         Cut, reframe into proper 9:16 YouTube Shorts vertical format (1080x1920)

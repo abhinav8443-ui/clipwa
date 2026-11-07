@@ -77,7 +77,7 @@ class ClipwaPipeline:
         platforms: str = "all",
         engine: str = "openfilm",
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-        style: str = "forseth_ai",
+        style: str = "pro_cinematic_reel",
     ) -> Dict[str, Any]:
         """
         Execute optimized two-stage pipeline:

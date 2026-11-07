@@ -21,6 +21,78 @@ from .config import Config, atomic_write_json
 
 logger = logging.getLogger("clipwa.style_cloner")
 
+# Clean bespoke human-editor cinema aesthetic modeled on reference Reels (DfXmsP9BXth & DbudQ6TR8IH)
+PRO_CINEMATIC_REEL_BLUEPRINT: Dict[str, Any] = {
+    "style_name": "pro_cinematic_reel",
+    "author": "Bespoke Human Cinema Editor",
+    "description": "100% clean luxury After Effects / Premiere Pro aesthetic modeled on high-performing cinematic Reels (DfXmsP9BXth & DbudQ6TR8IH). Zero HUD clutter, no top titles, no progress bars; pure moody film grade, subtle organic camera float, and buttery motion-blurred kinetic typography.",
+    "caption_style": {
+        "font_family": "Montserrat, 'Plus Jakarta Sans', 'Inter', -apple-system, sans-serif",
+        "font_weight": 800,
+        "font_size_px": 66,
+        "text_transform": "uppercase",
+        "letter_spacing_px": -0.4,
+        "letter_spacing_em": "-0.025em",
+        "top_pct": 68,
+        "top_px": 1300,
+        "safe_width_px": 840,
+        "safe_left_px": 120,
+        "max_words_per_phrase": 3,
+        "max_phrase_dur_sec": 1.5,
+        "color_default": "#F8F9FA",
+        "color_active": "#FFD60A",
+        "color_power": "#FFFFFF",
+        "color_danger": "#FFD60A",
+        "active_word_scale": 1.06,
+        "stroke_width_px": 0,
+        "stroke_color": "transparent",
+        "text_shadow": "0 4px 18px rgba(0, 0, 0, 0.9), 0 1px 4px rgba(0, 0, 0, 0.95)",
+        "active_text_shadow": "0 4px 20px rgba(0, 0, 0, 0.9), 0 0 22px rgba(255, 214, 10, 0.65)",
+        "entrance_motion_blur_px": 4.0,
+        "entrance_duration_sec": 0.11,
+        "box_backdrop_blur_px": 0,
+        "box_bg_color": "transparent",
+    },
+    "color_grade": {
+        "css_filter": "contrast(1.15) saturate(1.06) brightness(0.93)",
+        "bg_blur_px": 50,
+        "bg_brightness": 0.18,
+        "bg_saturate": 0.90,
+        "bg_scale": 1.10,
+        "vignette_radial": "radial-gradient(ellipse at center, rgba(0,0,0,0) 50%, rgba(0,0,0,0.55) 100%)",
+        "bottom_contrast_gradient": "linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0) 35%, rgba(0,0,0,0.65) 82%, rgba(0,0,0,0.88) 100%)",
+        "cinematic_film_grain_opacity": 0.035,
+    },
+    "framing_and_motion": {
+        "camera_zoom_enabled": True,
+        "zoom_interval_sec": 8.5,
+        "punch_in_scale": 1.09,
+        "handheld_float_px": 1.8,
+        "optical_pulse_duration_sec": 0.12,
+        "aspect_ratio": "9:16",
+        "fg_video_top_px": 460,
+        "fg_video_height_px": 1000,
+        "fg_border_radius_px": 18,
+        "fg_box_shadow": "0 25px 60px rgba(0, 0, 0, 0.85)",
+    },
+    "visual_accents": {
+        "glassmorphic_hook_badge": {
+            "enabled": False,
+        },
+        "progress_bar": {
+            "enabled": False,
+        },
+        "rhythm_cues": {
+            "optical_flash_pulse": True,
+            "motion_blur_reveal": True,
+        },
+    },
+    "reference_urls": [
+        "https://www.instagram.com/reel/DfXmsP9BXth/?utm_source=ig_web_copy_link",
+        "https://www.instagram.com/reel/DbudQ6TR8IH/?utm_source=ig_web_copy_link",
+    ],
+}
+
 # High-end deterministic @forseth.ai dark-luxury AI tech / motivational blueprint
 FORSETH_AI_BLUEPRINT: Dict[str, Any] = {
     "style_name": "forseth_ai",
@@ -101,7 +173,7 @@ FORSETH_AI_BLUEPRINT: Dict[str, Any] = {
 class StyleCloner:
     """Clones visual editing style from reference Instagram profiles or Reels."""
 
-    DEFAULT_REF_URL = "https://www.instagram.com/forseth.ai?utm_source=ig_web_button_share_sheet&exln=ZDNlZDc0MzIxNw=="
+    DEFAULT_REF_URL = "https://www.instagram.com/reel/DfXmsP9BXth/?utm_source=ig_web_copy_link"
 
     def __init__(
         self,
@@ -133,14 +205,14 @@ class StyleCloner:
             if bin_str not in current_path:
                 os.environ["PATH"] = bin_str + os.pathsep + current_path
 
-    def fetch_reference_reel(self, url: str) -> Tuple[Optional[Path], List[Path]]:
+    def fetch_reference_reel(self, url: str, output_filename: str = 'ref_video.mp4') -> Tuple[Optional[Path], List[Path]]:
         """
         Download reference Reel video from URL.
         1. Tries direct yt-dlp download (with ffmpeg in PATH).
         2. Falls back to Playwright if the URL is an Instagram profile or requires scraping.
         Returns (video_path, captured_frames).
         """
-        target_video = self.temp_dir / "ref_video.mp4"
+        target_video = self.temp_dir / output_filename
         captured_frames: List[Path] = []
 
         # If already exists and valid, reuse
@@ -405,11 +477,11 @@ class StyleCloner:
         """
         if not self.gemini_api_key:
             logger.info("No Gemini API key configured. Using deterministic high-end @forseth.ai style blueprint.")
-            return FORSETH_AI_BLUEPRINT
+            return PRO_CINEMATIC_REEL_BLUEPRINT
 
         # If no frames, return default blueprint
         if not frames:
-            return FORSETH_AI_BLUEPRINT
+            return PRO_CINEMATIC_REEL_BLUEPRINT
 
         try:
             from google import genai
@@ -495,12 +567,12 @@ Return ONLY valid JSON.
             return data
         except Exception as e:
             logger.warning(f"Gemini multimodal vision notice ({e}). Using deterministic @forseth.ai blueprint.")
-            return FORSETH_AI_BLUEPRINT
+            return PRO_CINEMATIC_REEL_BLUEPRINT
 
     def clone_from_url(
         self,
         url: Optional[str] = None,
-        style_name: str = "forseth_ai",
+        style_name: str = "pro_cinematic_reel",
     ) -> Dict[str, Any]:
         """
         Complete end-to-end style cloning workflow:

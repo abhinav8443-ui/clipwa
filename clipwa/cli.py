@@ -175,8 +175,8 @@ def cli():
 @click.option(
     "--style",
     "--style-ref",
-    default="forseth_ai",
-    help="OpenFilm visual style blueprint name or reference URL (default: forseth_ai).",
+    default="pro_cinematic_reel",
+    help="OpenFilm visual style blueprint name or reference URL (default: pro_cinematic_reel).",
 )
 def process(
     url_or_file,
