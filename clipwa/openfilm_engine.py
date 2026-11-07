@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import time
+import wave
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -102,6 +103,42 @@ class OpenFilmEngine:
         except Exception as e:
             logger.warning(f"OpenFilm availability check failed: {e}")
             return False
+
+    def probe_duration(self, file_path: Path) -> float:
+        """Probe exact media duration using wave module for wav files or ffprobe for video/audio."""
+        p = Path(file_path).resolve()
+        if not p.exists():
+            return 0.0
+        if p.suffix.lower() == ".wav":
+            try:
+                with wave.open(str(p), "rb") as w:
+                    return w.getnframes() / float(w.getframerate())
+            except Exception:
+                pass
+        ffprobe_bin = str(self.bin_dir / "ffprobe.exe")
+        if not Path(ffprobe_bin).exists():
+            ffprobe_bin = shutil.which("ffprobe") or "ffprobe"
+        try:
+            cmd = [
+                ffprobe_bin,
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(p),
+            ]
+            res = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+                shell=(os.name == "nt"),
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return float(res.stdout.strip())
+        except Exception:
+            pass
+        return 0.0
 
     def _group_words_into_phrases(
         self,
@@ -195,24 +232,55 @@ class OpenFilmEngine:
                 shutil.copy2(src_video, target_video)
         except Exception:
             shutil.copyfile(src_video, target_video)
+        clip_actual_dur = self.probe_duration(target_video)
 
         has_hook_sfx = False
         if hook_sfx_path and Path(hook_sfx_path).exists():
             target_sfx = assets_dir / "hook_sfx.wav"
             try:
                 shutil.copyfile(hook_sfx_path, target_sfx)
-                has_hook_sfx = True
+                has_hook_sfx = target_sfx.exists() and target_sfx.stat().st_size > 0
             except Exception:
                 pass
 
         has_bg_music = False
+        bg_actual_dur = 0.0
         if bg_tune_path and Path(bg_tune_path).exists():
             target_bg = assets_dir / "bg_music.wav"
             try:
-                shutil.copyfile(bg_tune_path, target_bg)
-                has_bg_music = True
-            except Exception:
-                pass
+                src_bg_dur = self.probe_duration(Path(bg_tune_path))
+                needed_dur = max(65.0, duration + 5.0)
+                if src_bg_dur < needed_dur:
+                    # Loop background music with ffmpeg so it is guaranteed longer than the clip
+                    ffmpeg_bin = str(self.bin_dir / "ffmpeg.exe")
+                    if not Path(ffmpeg_bin).exists():
+                        ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+                    tmp_bg = assets_dir / "bg_music_loop.wav"
+                    cmd = [
+                        ffmpeg_bin, "-y",
+                        "-stream_loop", "-1",
+                        "-i", str(bg_tune_path),
+                        "-t", f"{needed_dur:.2f}",
+                        "-c:a", "pcm_s16le",
+                        "-ar", "48000",
+                        "-ac", "2",
+                        str(tmp_bg),
+                    ]
+                    subprocess.run(
+                        cmd,
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        shell=(os.name == "nt"),
+                    )
+                    shutil.move(str(tmp_bg), target_bg)
+                else:
+                    shutil.copyfile(bg_tune_path, target_bg)
+
+                bg_actual_dur = self.probe_duration(target_bg)
+                has_bg_music = target_bg.exists() and target_bg.stat().st_size > 0
+            except Exception as e:
+                logger.warning(f"Failed to prepare bg_music.wav: {e}")
 
         # 2. Format words data into phrases
         phrases = self._group_words_into_phrases(words_data or [])
@@ -239,6 +307,8 @@ class OpenFilmEngine:
         self._write_film_html(
             output_path=film_html_path,
             duration=duration,
+            clip_actual_dur=clip_actual_dur,
+            bg_actual_dur=bg_actual_dur,
             has_hook_sfx=has_hook_sfx,
             has_bg_music=has_bg_music,
         )
@@ -250,20 +320,32 @@ class OpenFilmEngine:
         self,
         output_path: Path,
         duration: float,
+        clip_actual_dur: float,
+        bg_actual_dur: float,
         has_hook_sfx: bool,
         has_bg_music: bool,
     ) -> None:
         """Write the multi-track film.html according to OpenFilm Protocol 0.1."""
-        dur_str = f"{duration:.3f}"
+        # Clamp video duration strictly to actual file duration - 0.02s
+        if clip_actual_dur > 0:
+            v_end = min(duration, clip_actual_dur - 0.02)
+        else:
+            v_end = duration
+        v_dur_str = f"{v_end:.3f}"
 
         audio_tracks: List[str] = []
         if has_hook_sfx:
+            # Omit #t= so OpenFilm naturally plays the full sound effect without media fragment range errors
             audio_tracks.append(
-                f'  <section>\n    <audio id="hook_sfx" src="assets/hook_sfx.wav#t=0,1.5" volume="0.45"></audio>\n  </section>'
+                '  <section>\n    <audio id="hook_sfx" src="assets/hook_sfx.wav" volume="0.45"></audio>\n  </section>'
             )
         if has_bg_music:
+            if bg_actual_dur > 0:
+                bg_end = min(duration, bg_actual_dur - 0.05)
+            else:
+                bg_end = duration
             audio_tracks.append(
-                f'  <section>\n    <audio id="bg_music" src="assets/bg_music.wav#t=0,{dur_str}" volume="0.11"></audio>\n  </section>'
+                f'  <section>\n    <audio id="bg_music" src="assets/bg_music.wav#t=0,{bg_end:.3f}" volume="0.11"></audio>\n  </section>'
             )
 
         audio_tracks_block = "\n".join(audio_tracks) if audio_tracks else ""
@@ -299,13 +381,13 @@ class OpenFilmEngine:
 
   <!-- Track 2: Primary Foreground Video with Voice Audio (volume=1.0) -->
   <section>
-    <video id="fg_video" src="assets/clip.mp4#t=0,{dur_str}" volume="1.0" class="fg-video"
+    <video id="fg_video" src="assets/clip.mp4#t=0,{v_dur_str}" volume="1.0" class="fg-video"
            style="left: 0; top: 460px; width: 1080px; height: 1000px"></video>
   </section>
 
   <!-- Track 3: Ambient Blurred Background Video (muted) -->
   <section>
-    <video id="bg_video" src="assets/clip.mp4#t=0,{dur_str}" volume="0" class="bg-video"
+    <video id="bg_video" src="assets/clip.mp4#t=0,{v_dur_str}" volume="0" class="bg-video"
            style="left: 0; top: 0; width: 1080px; height: 1920px"></video>
   </section>
 
